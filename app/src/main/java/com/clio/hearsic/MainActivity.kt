@@ -19,13 +19,14 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
-import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.*
-import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -41,6 +42,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.rememberVectorPainter
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
@@ -58,8 +60,10 @@ import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
 import coil.compose.AsyncImage
 import com.clio.hearsic.ui.theme.HearsicTheme
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.util.Calendar
 import java.util.Locale
 
@@ -69,28 +73,23 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent {
             val context = LocalContext.current
-            var darkThemeSetting by remember { mutableStateOf("Sistema") }
-            var languageSetting by remember { mutableStateOf("Sistema") }
+            val uriHandler = LocalUriHandler.current
+            val prefs = context.getSharedPreferences("hearsic_settings", Context.MODE_PRIVATE)
 
-            val currentLanguage = if (languageSetting == "Sistema") {
+            var darkThemeSetting by remember { mutableStateOf(prefs.getString("theme", "System") ?: "System") }
+            var languageSetting by remember { mutableStateOf(prefs.getString("language", "System") ?: "System") }
+
+            val currentLanguage = if (languageSetting == "System") {
                 when (Locale.getDefault().language) {
-                    "en" -> "English"
-                    "fr" -> "Français"
-                    "de" -> "Deutsch"
-                    "it" -> "Italiano"
-                    "pt" -> "Português"
-                    "ja" -> "日本語"
-                    "ru" -> "Русский"
-                    "zh" -> "中文"
-                    "ko" -> "한국어"
-                    "ar" -> "العربية"
-                    "hi" -> "हिन्दी"
-                    else -> "Español"
+                    "en" -> "English"; "fr" -> "Français"; "de" -> "Deutsch";
+                    "it" -> "Italiano"; "pt" -> "Português"; "ja" -> "日本語";
+                    "ru" -> "Русский"; "zh" -> "中文"; "ko" -> "한국어";
+                    "ar" -> "العربية"; "hi" -> "हिन्दी"; else -> "Español"
                 }
             } else languageSetting
 
             val s = getAppStrings(currentLanguage)
-            val useDarkTheme = when (darkThemeSetting) { "Oscuro" -> true; "Claro" -> false; else -> isSystemInDarkTheme() }
+            val useDarkTheme = when (darkThemeSetting) { "Dark" -> true; "Light" -> false; else -> isSystemInDarkTheme() }
 
             val currentHour = remember { Calendar.getInstance().get(Calendar.HOUR_OF_DAY) }
             val greetingText = when (currentHour) {
@@ -99,17 +98,66 @@ class MainActivity : ComponentActivity() {
                 else -> "🌙 ${s.goodEvening}"
             }
 
+            var updateUrl by remember { mutableStateOf<String?>(null) }
+            var updateVersion by remember { mutableStateOf<String?>(null) }
+            val currentAppVersion = "v1.2.0"
+
+            LaunchedEffect(Unit) {
+                withContext(Dispatchers.IO) {
+                    try {
+                        val url = java.net.URL("https://api.github.com/repos/oriilol/hearsic/releases/latest")
+                        val connection = url.openConnection() as java.net.HttpURLConnection
+                        connection.requestMethod = "GET"
+                        val response = connection.inputStream.bufferedReader().readText()
+                        val tagMatch = Regex("\"tag_name\":\"(.*?)\"").find(response)
+                        val urlMatch = Regex("\"html_url\":\"(.*?)\"").find(response)
+                        if (tagMatch != null && urlMatch != null) {
+                            val latestVersion = tagMatch.groupValues[1]
+                            val cP = currentAppVersion.replace("v", "").split(".").map { it.toIntOrNull() ?: 0 }
+                            val lP = latestVersion.replace("v", "").split(".").map { it.toIntOrNull() ?: 0 }
+                            var isNewer = false
+                            for (i in 0 until maxOf(cP.size, lP.size)) {
+                                val c = cP.getOrElse(i) { 0 }
+                                val l = lP.getOrElse(i) { 0 }
+                                if (l > c) { isNewer = true; break }
+                                if (l < c) break
+                            }
+                            if (isNewer) {
+                                updateVersion = latestVersion
+                                updateUrl = urlMatch.groupValues[1]
+                            }
+                        }
+                    } catch (e: Exception) {}
+                }
+            }
+
             HearsicTheme(darkTheme = useDarkTheme) {
                 val scope = rememberCoroutineScope()
                 var songList by remember { mutableStateOf<List<Song>>(emptyList()) }
                 var selectedArtist by remember { mutableStateOf<String?>(null) }
                 var selectedPlaylist by remember { mutableStateOf<String?>(null) }
                 var selectedTab by rememberSaveable { mutableIntStateOf(1) }
-                var showFullScreenPlayer by rememberSaveable { mutableStateOf(false) }
+
+                var showFullScreenPlayer by rememberSaveable { mutableStateOf((context as? ComponentActivity)?.intent?.action == "OPEN_PLAYER") }
+
+                DisposableEffect(context) {
+                    val activity = context as ComponentActivity
+                    val listener = Consumer<Intent> { intent ->
+                        if (intent.action == "OPEN_PLAYER") showFullScreenPlayer = true
+                    }
+                    activity.addOnNewIntentListener(listener)
+                    onDispose { activity.removeOnNewIntentListener(listener) }
+                }
 
                 val playlists = remember { mutableStateListOf<String>().apply { addAll(getPlaylists(context)) } }
                 var showCreatePlaylistDialog by remember { mutableStateOf(false) }
                 var newPlaylistName by remember { mutableStateOf("") }
+                var playlistCoverTrigger by remember { mutableIntStateOf(0) }
+
+                var playlistOptionsFor by remember { mutableStateOf<String?>(null) }
+                var playlistToRename by remember { mutableStateOf<String?>(null) }
+                var showRenameDialog by remember { mutableStateOf(false) }
+                var renamePlaylistText by remember { mutableStateOf("") }
 
                 var exoPlayer by remember { mutableStateOf<Player?>(null) }
                 var currentMediaId by rememberSaveable { mutableStateOf<String?>(null) }
@@ -121,19 +169,14 @@ class MainActivity : ComponentActivity() {
                 var playbackPosition by remember { mutableLongStateOf(0L) }
                 var songDuration by remember { mutableLongStateOf(0L) }
 
-                val activity = LocalContext.current as ComponentActivity
-                LaunchedEffect(Unit) {
-                    if (activity.intent?.getBooleanExtra("open_player", false) == true) {
-                        showFullScreenPlayer = true
-                        activity.intent?.removeExtra("open_player")
+                val coverPickerLauncher = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+                    if (uri != null && selectedPlaylist != null) {
+                        try {
+                            context.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        } catch (e: Exception) {}
+                        context.getSharedPreferences("hearsic_pl", Context.MODE_PRIVATE).edit().putString("pl_cover_${selectedPlaylist}", uri.toString()).apply()
+                        playlistCoverTrigger++
                     }
-                    val listener = Consumer<Intent> { newIntent ->
-                        if (newIntent.getBooleanExtra("open_player", false)) {
-                            showFullScreenPlayer = true
-                            newIntent.removeExtra("open_player")
-                        }
-                    }
-                    activity.addOnNewIntentListener(listener)
                 }
 
                 LaunchedEffect(Unit) {
@@ -165,13 +208,23 @@ class MainActivity : ComponentActivity() {
                     } catch (e: Exception) {}
                 }
 
-                LaunchedEffect(isPlaying) { while (isPlaying) { playbackPosition = exoPlayer?.currentPosition ?: 0L; delay(32) } }
+                LaunchedEffect(isPlaying) { while (isPlaying) { playbackPosition = exoPlayer?.currentPosition ?: 0L; delay(500) } }
 
                 val pReq = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) Manifest.permission.READ_MEDIA_AUDIO else Manifest.permission.READ_EXTERNAL_STORAGE
                 val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { if (it) songList = queryMusic(context, s) }
                 LaunchedEffect(Unit) {
                     if (ContextCompat.checkSelfPermission(context, pReq) == PackageManager.PERMISSION_GRANTED) songList = queryMusic(context, s)
                     else launcher.launch(pReq)
+                }
+
+                if (updateUrl != null) {
+                    AlertDialog(
+                        onDismissRequest = { updateUrl = null },
+                        title = { Text(s.updateAvailable) },
+                        text = { Text("${s.newVersion} $updateVersion") },
+                        confirmButton = { TextButton(onClick = { uriHandler.openUri(updateUrl!!); updateUrl = null }) { Text(s.update) } },
+                        dismissButton = { TextButton(onClick = { updateUrl = null }) { Text(s.cancel) } }
+                    )
                 }
 
                 if (showCreatePlaylistDialog) {
@@ -192,6 +245,49 @@ class MainActivity : ComponentActivity() {
                     )
                 }
 
+                if (playlistOptionsFor != null) {
+                    AlertDialog(
+                        onDismissRequest = { playlistOptionsFor = null },
+                        title = { Text(playlistOptionsFor!!) },
+                        text = {
+                            Column {
+                                Text(s.rename, Modifier.clickable {
+                                    playlistToRename = playlistOptionsFor
+                                    renamePlaylistText = playlistOptionsFor!!
+                                    showRenameDialog = true
+                                    playlistOptionsFor = null
+                                }.fillMaxWidth().padding(16.dp))
+                                Text(s.delete, Modifier.clickable {
+                                    deletePlaylist(context, playlistOptionsFor!!)
+                                    playlists.remove(playlistOptionsFor!!)
+                                    playlistOptionsFor = null
+                                }.fillMaxWidth().padding(16.dp), color = MaterialTheme.colorScheme.error)
+                            }
+                        },
+                        confirmButton = { TextButton(onClick = { playlistOptionsFor = null }) { Text(s.cancel) } }
+                    )
+                }
+
+                if (showRenameDialog && playlistToRename != null) {
+                    AlertDialog(
+                        onDismissRequest = { showRenameDialog = false; playlistToRename = null },
+                        title = { Text(s.rename) },
+                        text = { OutlinedTextField(value = renamePlaylistText, onValueChange = { renamePlaylistText = it }) },
+                        confirmButton = {
+                            TextButton(onClick = {
+                                if (renamePlaylistText.isNotBlank() && renamePlaylistText != playlistToRename) {
+                                    renamePlaylist(context, playlistToRename!!, renamePlaylistText)
+                                    playlists.clear()
+                                    playlists.addAll(getPlaylists(context))
+                                }
+                                showRenameDialog = false
+                                playlistToRename = null
+                            }) { Text(s.rename) }
+                        },
+                        dismissButton = { TextButton(onClick = { showRenameDialog = false; playlistToRename = null }) { Text(s.cancel) } }
+                    )
+                }
+
                 Scaffold(
                     modifier = Modifier.fillMaxSize(),
                     bottomBar = {
@@ -207,37 +303,47 @@ class MainActivity : ComponentActivity() {
                 ) { pV ->
                     Column(modifier = Modifier.fillMaxSize().padding(pV)) {
                         Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
-                            Crossfade(targetState = selectedTab, label = "") { tab ->
+                            Crossfade(targetState = selectedTab, label = "Tab") { tab ->
                                 when (tab) {
                                     0 -> {
-                                        AnimatedContent(targetState = selectedPlaylist, label = "") { target ->
+                                        AnimatedContent(targetState = selectedPlaylist, label = "PlaylistAnim", modifier = Modifier.fillMaxSize()) { target ->
                                             if (target == null) {
                                                 Column(Modifier.fillMaxSize()) {
                                                     Button(onClick = { showCreatePlaylistDialog = true }, modifier = Modifier.fillMaxWidth().padding(16.dp)) { Icon(Icons.Default.Add, null); Spacer(Modifier.width(8.dp)); Text(s.newPlaylist) }
                                                     if (playlists.isEmpty()) Box(Modifier.fillMaxSize(), Alignment.Center) { Text(s.noPlaylists, color = MaterialTheme.colorScheme.onSurfaceVariant) }
-                                                    else LazyColumn(Modifier.fillMaxSize()) { items(playlists.size) { index ->
-                                                        val p = playlists[index]
-                                                        Row(modifier = Modifier.fillMaxWidth().clickable { selectedPlaylist = p }.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-                                                            Box(Modifier.size(56.dp).clip(RoundedCornerShape(8.dp)).background(MaterialTheme.colorScheme.secondaryContainer), Alignment.Center) { Icon(Icons.AutoMirrored.Filled.PlaylistPlay, null) }
-                                                            Spacer(Modifier.width(16.dp)); Text(p, fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                                                    else LazyColumn(Modifier.fillMaxSize()) {
+                                                        items(playlists, key = { it }) { p ->
+                                                            val coverUri = context.getSharedPreferences("hearsic_pl", Context.MODE_PRIVATE).getString("pl_cover_$p", null)
+                                                            val forceRecompose = playlistCoverTrigger
+                                                            Row(modifier = Modifier.fillMaxWidth().pointerInput(Unit) { detectTapGestures(onTap = { selectedPlaylist = p }, onLongPress = { playlistOptionsFor = p }) }.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                                                                Box(Modifier.size(56.dp).clip(RoundedCornerShape(8.dp)).background(MaterialTheme.colorScheme.secondaryContainer), Alignment.Center) {
+                                                                    if (coverUri != null && forceRecompose >= 0) {
+                                                                        AsyncImage(model = Uri.parse(coverUri), contentDescription = null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                                                                    } else {
+                                                                        Icon(Icons.AutoMirrored.Filled.PlaylistPlay, null)
+                                                                    }
+                                                                }
+                                                                Spacer(Modifier.width(16.dp)); Text(p, fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                                                            }
                                                         }
-                                                    }}
+                                                    }
                                                 }
                                             } else {
                                                 BackHandler { selectedPlaylist = null }
                                                 val playlistSongs = getSongsForPlaylist(context, target, songList)
-                                                Column {
+                                                Column(Modifier.fillMaxSize()) {
                                                     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(16.dp)) {
                                                         IconButton(onClick = { selectedPlaylist = null }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, null) }
                                                         Text(target, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                                                        IconButton(onClick = { coverPickerLauncher.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) }) { Icon(Icons.Default.AddPhotoAlternate, null) }
                                                         if (playlistSongs.isNotEmpty()) {
                                                             FilledTonalButton(onClick = { playQueue(playlistSongs, 0, exoPlayer, true) }) { Icon(Icons.Default.PlayArrow, null); Text(" Mix") }
                                                         }
                                                     }
                                                     if (playlistSongs.isEmpty()) Box(Modifier.fillMaxSize(), Alignment.Center) { Text(s.noMusic, color = MaterialTheme.colorScheme.onSurfaceVariant) }
-                                                    else LazyColumn {
-                                                        items(playlistSongs.size) { index ->
-                                                            val song = playlistSongs[index]
+                                                    else LazyColumn(Modifier.fillMaxSize()) {
+                                                        items(playlistSongs, key = { it.id }) { song ->
+                                                            val index = playlistSongs.indexOf(song)
                                                             SongRowSafe(song, s, currentMediaId == song.id.toString()) { playQueue(playlistSongs, index, exoPlayer, false) }
                                                         }
                                                     }
@@ -251,8 +357,8 @@ class MainActivity : ComponentActivity() {
                                             Column(Modifier.fillMaxSize()) {
                                                 Text(text = greetingText, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.ExtraBold, modifier = Modifier.padding(20.dp, 20.dp, 20.dp, 8.dp))
                                                 LazyColumn(Modifier.fillMaxSize()) {
-                                                    items(songList.size) { index ->
-                                                        val song = songList[index]
+                                                    items(songList, key = { it.id }) { song ->
+                                                        val index = songList.indexOf(song)
                                                         SongRowSafe(song, s, currentMediaId == song.id.toString()) { playQueue(songList, index, exoPlayer, false) }
                                                     }
                                                 }
@@ -260,16 +366,18 @@ class MainActivity : ComponentActivity() {
                                         }
                                     }
                                     2 -> {
-                                        AnimatedContent(targetState = selectedArtist, label = "") { target ->
+                                        AnimatedContent(targetState = selectedArtist, label = "ArtistAnim", modifier = Modifier.fillMaxSize()) { target ->
                                             if (target == null) {
-                                                LazyColumn(Modifier.fillMaxSize()) { items(songList.map { it.artist }.distinct().size) { index ->
-                                                    val a = songList.map { it.artist }.distinct()[index]
-                                                    ArtistRow(a) { selectedArtist = a }
-                                                }}
+                                                val distinctArtists = songList.map { it.artist }.distinct()
+                                                LazyColumn(Modifier.fillMaxSize()) {
+                                                    items(distinctArtists, key = { it }) { a ->
+                                                        ArtistRow(a) { selectedArtist = a }
+                                                    }
+                                                }
                                             } else {
                                                 BackHandler { selectedArtist = null }
                                                 val artistSongs = songList.filter { it.artist == target }
-                                                Column {
+                                                Column(Modifier.fillMaxSize()) {
                                                     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(16.dp)) {
                                                         IconButton(onClick = { selectedArtist = null }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, null) }
                                                         Text(target, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
@@ -277,9 +385,9 @@ class MainActivity : ComponentActivity() {
                                                             FilledTonalButton(onClick = { playQueue(artistSongs, 0, exoPlayer, true) }) { Icon(Icons.Default.PlayArrow, null); Text(" Mix") }
                                                         }
                                                     }
-                                                    LazyColumn {
-                                                        items(artistSongs.size) { index ->
-                                                            val song = artistSongs[index]
+                                                    LazyColumn(Modifier.fillMaxSize()) {
+                                                        items(artistSongs, key = { it.id }) { song ->
+                                                            val index = artistSongs.indexOf(song)
                                                             SongRowSafe(song, s, currentMediaId == song.id.toString()) { playQueue(artistSongs, index, exoPlayer, false) }
                                                         }
                                                     }
@@ -287,7 +395,13 @@ class MainActivity : ComponentActivity() {
                                             }
                                         }
                                     }
-                                    3 -> SettingsScreen(s, darkThemeSetting, { darkThemeSetting = it }, languageSetting, { languageSetting = it })
+                                    3 -> SettingsScreen(
+                                        s,
+                                        darkThemeSetting,
+                                        { darkThemeSetting = it; prefs.edit().putString("theme", it).apply() },
+                                        languageSetting,
+                                        { languageSetting = it; prefs.edit().putString("language", it).apply() }
+                                    )
                                 }
                             }
                         }
@@ -336,17 +450,34 @@ fun getSongsForPlaylist(ctx: Context, plName: String, allSongs: List<Song>): Lis
     val songIds = ctx.getSharedPreferences("hearsic_pl", Context.MODE_PRIVATE).getStringSet("pl_songs_$plName", emptySet()) ?: emptySet()
     return allSongs.filter { songIds.contains(it.id.toString()) }
 }
+fun deletePlaylist(ctx: Context, name: String) {
+    val prefs = ctx.getSharedPreferences("hearsic_pl", Context.MODE_PRIVATE)
+    val names = prefs.getStringSet("all_pl", emptySet())?.toMutableSet() ?: mutableSetOf()
+    names.remove(name)
+    prefs.edit().putStringSet("all_pl", names).remove("pl_songs_$name").remove("pl_cover_$name").apply()
+}
+fun renamePlaylist(ctx: Context, oldName: String, newName: String) {
+    val prefs = ctx.getSharedPreferences("hearsic_pl", Context.MODE_PRIVATE)
+    val names = prefs.getStringSet("all_pl", emptySet())?.toMutableSet() ?: mutableSetOf()
+    names.remove(oldName)
+    names.add(newName)
+    val songs = prefs.getStringSet("pl_songs_$oldName", emptySet())
+    val cover = prefs.getString("pl_cover_$oldName", null)
+    val editor = prefs.edit().putStringSet("all_pl", names).remove("pl_songs_$oldName").remove("pl_cover_$oldName")
+    if (songs != null) editor.putStringSet("pl_songs_$newName", songs)
+    if (cover != null) editor.putString("pl_cover_$newName", cover)
+    editor.apply()
+}
 
 data class LrcLine(val timeMs: Long, val text: String)
 fun parseLrc(lrc: String): List<LrcLine> {
-    val regex = Regex("""\[(\d{2,}):(\d{2})(?:\.(\d{1,3}))?\](.*)""")
+    val regex = Regex("""\[(\d{2}):(\d{2})\.(\d{2,3})\](.*)""")
     return lrc.lines().mapNotNull { line ->
         val match = regex.find(line)
         if (match != null) {
             val min = match.groupValues[1].toLong()
             val sec = match.groupValues[2].toLong()
-            val msStr = match.groupValues[3]
-            val ms = if (msStr.isNotEmpty()) msStr.padEnd(3, '0').toLong() else 0L
+            val ms = match.groupValues[3].padEnd(3, '0').toLong()
             val text = match.groupValues[4].trim()
             LrcLine(min * 60000 + sec * 1000 + ms, text)
         } else null
@@ -357,17 +488,29 @@ fun parseLrc(lrc: String): List<LrcLine> {
 fun SettingsScreen(s: HStrings, darkT: String, onT: (String) -> Unit, lang: String, onL: (String) -> Unit) {
     val uriH = LocalUriHandler.current
     Column(Modifier.fillMaxSize().padding(24.dp).verticalScroll(rememberScrollState())) {
-        Text(s.settings, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.ExtraBold); Spacer(Modifier.height(32.dp))
+        Text(s.settings, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.ExtraBold)
+        Spacer(Modifier.height(32.dp))
         Text(s.theme, fontWeight = FontWeight.Bold)
-        Row(Modifier.padding(vertical = 8.dp)) { listOf("Sistema", "Claro", "Oscuro").forEach { t -> FilterChip(selected = darkT == t, onClick = { onT(t) }, label = { Text(t) }, modifier = Modifier.padding(end = 8.dp)) } }
-        Spacer(Modifier.height(24.dp)); Text(s.language, fontWeight = FontWeight.Bold)
+        Row(Modifier.padding(vertical = 8.dp)) {
+            val themeKeys = listOf("System", "Light", "Dark")
+            val themeLabels = listOf(s.system, s.light, s.dark)
+            themeKeys.forEachIndexed { i, t ->
+                FilterChip(selected = darkT == t, onClick = { onT(t) }, label = { Text(themeLabels[i]) }, modifier = Modifier.padding(end = 8.dp))
+            }
+        }
+        Spacer(Modifier.height(24.dp))
+        Text(s.language, fontWeight = FontWeight.Bold)
         @OptIn(ExperimentalLayoutApi::class)
         FlowRow(Modifier.padding(vertical = 8.dp)) {
-            listOf("Sistema", "Español", "English", "Français", "Deutsch", "Italiano", "Português", "日本語", "Русский", "中文", "한국어", "العربية", "हिन्दी").forEach { l -> FilterChip(selected = lang == l, onClick = { onL(l) }, label = { Text(l) }, modifier = Modifier.padding(end = 8.dp, bottom = 8.dp)) }
+            val langKeys = listOf("System", "Español", "English", "Français", "Deutsch", "Italiano", "Português", "日本語", "Русский", "中文", "한국어", "العربية", "हिन्दी")
+            langKeys.forEach { l ->
+                val labelText = if (l == "System") s.system else l
+                FilterChip(selected = lang == l, onClick = { onL(l) }, label = { Text(labelText) }, modifier = Modifier.padding(end = 8.dp, bottom = 8.dp))
+            }
         }
         Spacer(Modifier.weight(1f))
         Column(Modifier.fillMaxWidth().padding(top = 40.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-            Text("made w/ love from 🇪🇸 <3", style = MaterialTheme.typography.bodySmall)
+            Text("made w/ love from spain 🇪🇸 <3", style = MaterialTheme.typography.bodySmall)
             Text("github.com/oriilol", Modifier.clickable { uriH.openUri("https://github.com/oriilol") }.padding(8.dp), color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
         }
     }
@@ -415,13 +558,13 @@ fun MiniPlayer(song: Song?, isPlaying: Boolean, onOpen: () -> Unit, onPlayPause:
 }
 
 @Composable
-fun LrcViewer(parsedLyrics: List<LrcLine>, currentPos: Long, onSeekTo: (Long) -> Unit) {
+fun LrcViewer(parsedLyrics: List<LrcLine>, currentPos: Long, onSeek: (Long) -> Unit) {
     val listState = rememberLazyListState()
     val activeIndex = parsedLyrics.indexOfLast { it.timeMs <= currentPos }.coerceAtLeast(0)
 
     LaunchedEffect(activeIndex) {
         if (activeIndex >= 0 && parsedLyrics.isNotEmpty()) {
-            listState.animateScrollToItem(activeIndex.coerceAtLeast(0), scrollOffset = -200)
+            listState.animateScrollToItem(activeIndex.coerceAtLeast(0), scrollOffset = -300)
         }
     }
 
@@ -429,21 +572,13 @@ fun LrcViewer(parsedLyrics: List<LrcLine>, currentPos: Long, onSeekTo: (Long) ->
         items(parsedLyrics.size) { index ->
             val line = parsedLyrics[index]
             val isActive = index == activeIndex
-
-            val alpha by animateFloatAsState(targetValue = if (isActive) 1f else 0.4f, label = "")
-            val textSize by animateFloatAsState(targetValue = if (isActive) 24f else 18f, label = "")
-
             Text(
                 text = line.text,
-                color = MaterialTheme.colorScheme.onSurface.copy(alpha = alpha),
-                fontWeight = if (isActive) FontWeight.ExtraBold else FontWeight.Bold,
-                fontSize = textSize.sp,
-                lineHeight = (textSize * 1.3f).sp,
+                color = if (isActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
+                fontWeight = if (isActive) FontWeight.ExtraBold else FontWeight.Normal,
+                fontSize = if (isActive) 24.sp else 18.sp,
                 textAlign = TextAlign.Center,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 12.dp, horizontal = 8.dp)
-                    .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { onSeekTo(line.timeMs) }
+                modifier = Modifier.padding(vertical = 12.dp).clickable { onSeek(line.timeMs) }
             )
         }
     }
@@ -458,9 +593,7 @@ fun FullScreenPlayer(song: Song?, isPlaying: Boolean, pos: Long, dur: Long, onCl
     var isEditingLyrics by rememberSaveable { mutableStateOf(false) }
     var showAddPlaylist by remember { mutableStateOf(false) }
     var speed by remember { mutableFloatStateOf(1f) }
-
-    var isSliderDragging by remember { mutableStateOf(false) }
-    var sliderValue by remember { mutableFloatStateOf(0f) }
+    var sliderPos by remember { mutableStateOf<Float?>(null) }
 
     val prefs = context.getSharedPreferences("lyrics_db", Context.MODE_PRIVATE)
     var lyricsText by remember(song) { mutableStateOf(prefs.getString("lyrics_${song?.id}", "") ?: "") }
@@ -468,6 +601,7 @@ fun FullScreenPlayer(song: Song?, isPlaying: Boolean, pos: Long, dur: Long, onCl
 
     val configuration = LocalConfiguration.current
     val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
+    val currentDisplayPos = sliderPos?.toLong() ?: pos
 
     if (showInfo && song != null) {
         AlertDialog(onDismissRequest = { showInfo = false }, title = { Text("ℹ️ Info") }, text = { Column { Text("Formato: ${song.mimeType}"); Text("Tamaño: ${formatSize(song.size)}") } }, confirmButton = { TextButton(onClick = { showInfo = false }) { Text("OK") } })
@@ -492,14 +626,12 @@ fun FullScreenPlayer(song: Song?, isPlaying: Boolean, pos: Long, dur: Long, onCl
         if (isLandscape) {
             Row(modifier = Modifier.fillMaxSize().padding(16.dp)) {
                 Box(modifier = Modifier.weight(1f).fillMaxHeight().clip(RoundedCornerShape(28.dp)).background(MaterialTheme.colorScheme.surfaceVariant), contentAlignment = Alignment.Center) {
-                    AnimatedContent(targetState = showLyrics, transitionSpec = { fadeIn() togetherWith fadeOut() }, label = "") { showingLyrics ->
-                        if (showingLyrics) {
-                            if (isEditingLyrics) OutlinedTextField(value = lyricsText, onValueChange = { lyricsText = it; prefs.edit().putString("lyrics_${song?.id}", it).apply() }, modifier = Modifier.fillMaxSize().padding(8.dp))
-                            else if (parsedLyrics.isNotEmpty()) LrcViewer(parsedLyrics, pos, onSeek)
-                            else if (lyricsText.isNotBlank()) Text(lyricsText, modifier = Modifier.padding(16.dp).verticalScroll(rememberScrollState()), textAlign = TextAlign.Center)
-                            else OutlinedTextField(value = lyricsText, onValueChange = { lyricsText = it; prefs.edit().putString("lyrics_${song?.id}", it).apply() }, modifier = Modifier.fillMaxSize().padding(8.dp), placeholder = { Text("Pega la letra o el archivo LRC aquí...") })
-                        } else AsyncImage(model = song?.artworkUri, contentDescription = null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop, error = rememberVectorPainter(Icons.Default.MusicNote))
-                    }
+                    if (showLyrics) {
+                        if (isEditingLyrics) OutlinedTextField(value = lyricsText, onValueChange = { lyricsText = it; prefs.edit().putString("lyrics_${song?.id}", it).apply() }, modifier = Modifier.fillMaxSize().padding(8.dp))
+                        else if (parsedLyrics.isNotEmpty()) LrcViewer(parsedLyrics, currentDisplayPos, onSeek)
+                        else if (lyricsText.isNotBlank()) Text(lyricsText, modifier = Modifier.padding(16.dp).verticalScroll(rememberScrollState()), textAlign = TextAlign.Center)
+                        else OutlinedTextField(value = lyricsText, onValueChange = { lyricsText = it; prefs.edit().putString("lyrics_${song?.id}", it).apply() }, modifier = Modifier.fillMaxSize().padding(8.dp), placeholder = { Text("Pega la letra o el archivo LRC aquí...") })
+                    } else AsyncImage(model = song?.artworkUri, contentDescription = null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop, error = rememberVectorPainter(Icons.Default.MusicNote))
                 }
                 Spacer(Modifier.width(24.dp))
                 Column(modifier = Modifier.weight(1f).fillMaxHeight(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
@@ -520,13 +652,8 @@ fun FullScreenPlayer(song: Song?, isPlaying: Boolean, pos: Long, dur: Long, onCl
                     }
                     Text(song?.artist ?: s.unknownArtist, style = MaterialTheme.typography.titleLarge, color = MaterialTheme.colorScheme.primary, maxLines = 1)
                     Spacer(Modifier.height(24.dp))
-                    Slider(
-                        value = if (isSliderDragging) sliderValue else (if (dur > 0) pos.toFloat() else 0f),
-                        onValueChange = { isSliderDragging = true; sliderValue = it },
-                        onValueChangeFinished = { isSliderDragging = false; onSeek(sliderValue.toLong()) },
-                        valueRange = 0f..(if (dur > 0) dur.toFloat() else 1f)
-                    )
-                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) { Text(formatTime(if (isSliderDragging) sliderValue.toLong() else pos), style = MaterialTheme.typography.bodySmall); Text(formatTime(dur), style = MaterialTheme.typography.bodySmall) }
+                    Slider(value = sliderPos ?: if (dur > 0) pos.toFloat() else 0f, onValueChange = { sliderPos = it }, onValueChangeFinished = { sliderPos?.let { onSeek(it.toLong()) }; sliderPos = null }, valueRange = 0f..(if (dur > 0) dur.toFloat() else 1f))
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) { Text(formatTime(currentDisplayPos), style = MaterialTheme.typography.bodySmall); Text(formatTime(dur), style = MaterialTheme.typography.bodySmall) }
                     Spacer(Modifier.height(24.dp))
                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
                         TextButton(onClick = { speed = when (speed) { 1f -> 1.5f; 1.5f -> 2f; 2f -> 0.5f; else -> 1f }; player?.setPlaybackSpeed(speed) }) { Text("${speed}x", fontWeight = FontWeight.Bold, fontSize = 18.sp) }
@@ -550,14 +677,12 @@ fun FullScreenPlayer(song: Song?, isPlaying: Boolean, pos: Long, dur: Long, onCl
                 }
                 Spacer(Modifier.weight(1f))
                 Box(modifier = Modifier.fillMaxWidth().aspectRatio(1f).clip(RoundedCornerShape(28.dp)).background(MaterialTheme.colorScheme.surfaceVariant), contentAlignment = Alignment.Center) {
-                    AnimatedContent(targetState = showLyrics, transitionSpec = { fadeIn() togetherWith fadeOut() }, label = "") { showingLyrics ->
-                        if (showingLyrics) {
-                            if (isEditingLyrics) OutlinedTextField(value = lyricsText, onValueChange = { lyricsText = it; prefs.edit().putString("lyrics_${song?.id}", it).apply() }, modifier = Modifier.fillMaxSize().padding(8.dp))
-                            else if (parsedLyrics.isNotEmpty()) LrcViewer(parsedLyrics, pos, onSeek)
-                            else if (lyricsText.isNotBlank()) Text(lyricsText, modifier = Modifier.padding(16.dp).verticalScroll(rememberScrollState()), textAlign = TextAlign.Center)
-                            else OutlinedTextField(value = lyricsText, onValueChange = { lyricsText = it; prefs.edit().putString("lyrics_${song?.id}", it).apply() }, modifier = Modifier.fillMaxSize().padding(8.dp), placeholder = { Text("Pega la letra o el archivo LRC aquí...") })
-                        } else AsyncImage(model = song?.artworkUri, contentDescription = null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop, error = rememberVectorPainter(Icons.Default.MusicNote))
-                    }
+                    if (showLyrics) {
+                        if (isEditingLyrics) OutlinedTextField(value = lyricsText, onValueChange = { lyricsText = it; prefs.edit().putString("lyrics_${song?.id}", it).apply() }, modifier = Modifier.fillMaxSize().padding(8.dp))
+                        else if (parsedLyrics.isNotEmpty()) LrcViewer(parsedLyrics, currentDisplayPos, onSeek)
+                        else if (lyricsText.isNotBlank()) Text(lyricsText, modifier = Modifier.padding(16.dp).verticalScroll(rememberScrollState()), textAlign = TextAlign.Center)
+                        else OutlinedTextField(value = lyricsText, onValueChange = { lyricsText = it; prefs.edit().putString("lyrics_${song?.id}", it).apply() }, modifier = Modifier.fillMaxSize().padding(8.dp), placeholder = { Text("Pega la letra o el archivo LRC aquí...") })
+                    } else AsyncImage(model = song?.artworkUri, contentDescription = null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop, error = rememberVectorPainter(Icons.Default.MusicNote))
                 }
                 Spacer(Modifier.height(48.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -568,15 +693,8 @@ fun FullScreenPlayer(song: Song?, isPlaying: Boolean, pos: Long, dur: Long, onCl
                 }
                 Text(song?.artist ?: s.unknownArtist, style = MaterialTheme.typography.titleLarge, color = MaterialTheme.colorScheme.primary, maxLines = 1)
                 Spacer(Modifier.height(48.dp))
-
-                Slider(
-                    value = if (isSliderDragging) sliderValue else (if (dur > 0) pos.toFloat() else 0f),
-                    onValueChange = { isSliderDragging = true; sliderValue = it },
-                    onValueChangeFinished = { isSliderDragging = false; onSeek(sliderValue.toLong()) },
-                    valueRange = 0f..(if (dur > 0) dur.toFloat() else 1f)
-                )
-
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) { Text(formatTime(if (isSliderDragging) sliderValue.toLong() else pos), style = MaterialTheme.typography.bodySmall); Text(formatTime(dur), style = MaterialTheme.typography.bodySmall) }
+                Slider(value = sliderPos ?: if (dur > 0) pos.toFloat() else 0f, onValueChange = { sliderPos = it }, onValueChangeFinished = { sliderPos?.let { onSeek(it.toLong()) }; sliderPos = null }, valueRange = 0f..(if (dur > 0) dur.toFloat() else 1f))
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) { Text(formatTime(currentDisplayPos), style = MaterialTheme.typography.bodySmall); Text(formatTime(dur), style = MaterialTheme.typography.bodySmall) }
                 Spacer(Modifier.height(24.dp))
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
                     TextButton(onClick = { speed = when (speed) { 1f -> 1.5f; 1.5f -> 2f; 2f -> 0.5f; else -> 1f }; player?.setPlaybackSpeed(speed) }) { Text("${speed}x", fontWeight = FontWeight.Bold, fontSize = 18.sp) }
@@ -607,17 +725,28 @@ data class Song(val id: Long, val title: String, val artist: String, val uri: Ur
 fun queryMusic(c: Context, s: HStrings): List<Song> {
     val sL = mutableListOf<Song>()
     val col = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL) else MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
-    val proj = arrayOf(MediaStore.Audio.Media._ID, MediaStore.Audio.Media.TITLE, MediaStore.Audio.Media.ARTIST, MediaStore.Audio.Media.ALBUM_ID, MediaStore.Audio.Media.SIZE, MediaStore.Audio.Media.MIME_TYPE)
+    val proj = arrayOf(MediaStore.Audio.Media._ID, MediaStore.Audio.Media.TITLE, MediaStore.Audio.Media.ARTIST, MediaStore.Audio.Media.ALBUM_ID, MediaStore.Audio.Media.SIZE, MediaStore.Audio.Media.MIME_TYPE, MediaStore.Audio.Media.DATA)
     try {
         c.contentResolver.query(col, proj, "${MediaStore.Audio.Media.IS_MUSIC} != 0", null, null)?.use { cur ->
-            val iC = cur.getColumnIndexOrThrow(MediaStore.Audio.Media._ID); val tC = cur.getColumnIndexOrThrow(MediaStore.Audio.Media.TITLE)
-            val aC = cur.getColumnIndexOrThrow(MediaStore.Audio.Media.ARTIST); val albC = cur.getColumnIndexOrThrow(MediaStore.Audio.Media.ALBUM_ID)
-            val szC = cur.getColumnIndexOrThrow(MediaStore.Audio.Media.SIZE); val mmC = cur.getColumnIndexOrThrow(MediaStore.Audio.Media.MIME_TYPE)
+            val iC = cur.getColumnIndexOrThrow(MediaStore.Audio.Media._ID)
+            val tC = cur.getColumnIndexOrThrow(MediaStore.Audio.Media.TITLE)
+            val aC = cur.getColumnIndexOrThrow(MediaStore.Audio.Media.ARTIST)
+            val albC = cur.getColumnIndexOrThrow(MediaStore.Audio.Media.ALBUM_ID)
+            val szC = cur.getColumnIndexOrThrow(MediaStore.Audio.Media.SIZE)
+            val mmC = cur.getColumnIndexOrThrow(MediaStore.Audio.Media.MIME_TYPE)
+            val dataC = cur.getColumnIndexOrThrow(MediaStore.Audio.Media.DATA)
+
             while (cur.moveToNext()) {
-                val id = cur.getLong(iC); val rT = cur.getString(tC); val rA = cur.getString(aC)
-                val size = cur.getLong(szC); val mime = cur.getString(mmC) ?: "audio/unknown"
-                val artUri = ContentUris.withAppendedId(Uri.parse("content://media/external/audio/albumart"), cur.getLong(albC))
-                sL.add(Song(id, rT ?: s.unknownTitle, rA ?: s.unknownArtist, ContentUris.withAppendedId(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, id), artUri, size, mime))
+                val path = cur.getString(dataC) ?: ""
+                if (!path.contains("Recordings", true) && !path.contains("Call", true) && !path.contains("Voice", true) && !path.contains("WhatsApp Audio", true)) {
+                    val id = cur.getLong(iC)
+                    val rT = cur.getString(tC)
+                    val rA = cur.getString(aC)
+                    val size = cur.getLong(szC)
+                    val mime = cur.getString(mmC) ?: "audio/unknown"
+                    val artUri = ContentUris.withAppendedId(Uri.parse("content://media/external/audio/albumart"), cur.getLong(albC))
+                    sL.add(Song(id, rT ?: s.unknownTitle, rA ?: s.unknownArtist, ContentUris.withAppendedId(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, id), artUri, size, mime))
+                }
             }
         }
     } catch (e: Exception) { return emptyList() }
@@ -637,20 +766,22 @@ data class HStrings(
     val theme: String, val language: String, val soon: String, val noMusic: String, val update: String,
     val unknown: String, val unknownTitle: String, val unknownArtist: String, val newPlaylist: String,
     val noPlaylists: String, val create: String, val cancel: String, val addToPlaylist: String,
-    val goodMorning: String, val goodAfternoon: String, val goodEvening: String, val hq: String
+    val goodMorning: String, val goodAfternoon: String, val goodEvening: String, val hq: String,
+    val system: String, val light: String, val dark: String, val updateAvailable: String, val newVersion: String,
+    val rename: String, val delete: String
 )
 
 fun getAppStrings(l: String): HStrings = when(l) {
-    "English" -> HStrings("Playlists", "Songs", "Artists", "Albums", "Settings", "Theme", "Language", "Soon", "No music", "Update Library", "Unknown", "Unknown Title", "Unknown Artist", "New Playlist", "No playlists yet", "Create", "Cancel", "Add to Playlist", "Good morning", "Good afternoon", "Good evening", "HQ")
-    "Français" -> HStrings("Playlists", "Chansons", "Artistes", "Albums", "Paramètres", "Thème", "Langue", "Bientôt", "Aucune musique", "Mettre à jour", "Inconnu", "Titre inconnu", "Artiste inconnu", "Nouvelle Playlist", "Aucune playlist", "Créer", "Annuler", "Ajouter à la playlist", "Bonjour", "Bon après-midi", "Bonsoir", "HQ")
-    "Deutsch" -> HStrings("Playlists", "Lieder", "Künstler", "Alben", "Einstellungen", "Thema", "Sprache", "Bald", "Keine Musik", "Bibliothek aktualisieren", "Unbekannt", "Unbekannter Titel", "Unbekannter Künstler", "Neue Playlist", "Noch keine Playlists", "Erstellen", "Abbrechen", "Zur Playlist hinzufügen", "Guten Morgen", "Guten Tag", "Guten Abend", "HQ")
-    "Italiano" -> HStrings("Playlist", "Canzoni", "Artisti", "Album", "Impostazioni", "Tema", "Lingua", "Presto", "Nessuna musica", "Aggiorna libreria", "Sconosciuto", "Titolo sconosciuto", "Artista sconosciuto", "Nuova Playlist", "Nessuna playlist", "Creare", "Annulla", "Aggiungi alla playlist", "Buongiorno", "Buon pomeriggio", "Buonasera", "HQ")
-    "Português" -> HStrings("Playlists", "Músicas", "Artistas", "Álbuns", "Configurações", "Tema", "Idioma", "Em breve", "Nenhuma música", "Atualizar Biblioteca", "Desconhecido", "Título desconhecido", "Artista desconhecido", "Nova Playlist", "Nenhuma playlist ainda", "Criar", "Cancelar", "Adicionar à playlist", "Bom dia", "Boa tarde", "Boa noite", "HQ")
-    "日本語" -> HStrings("プレイリスト", "曲", "アーティスト", "アルバム", "設定", "テーマ", "言語", "もうすぐ", "音楽がありません", "ライブラリを更新", "不明", "不明なタイトル", "不明なアーティスト", "新しいプレイリスト", "プレイリストがありません", "作成", "キャンセル", "プレイリストに追加", "おはようございます", "こんにちは", "こんばんは", "高音質")
-    "Русский" -> HStrings("Плейлисты", "Песни", "Исполнители", "Альбомы", "Настройки", "Тема", "Язык", "Скоро", "Нет музыки", "Обновить библиотеку", "Неизвестно", "Неизвестное название", "Неизвестный исполнитель", "Новый плейлист", "Нет плейлистов", "Создать", "Отмена", "Добавить в плейлист", "Доброе утро", "Добрый день", "Добрый вечер", "HQ")
-    "中文" -> HStrings("播放列表", "歌曲", "艺术家", "专辑", "设置", "主题", "语言", "即将推出", "没有音乐", "更新库", "未知", "未知标题", "未知艺术家", "新播放列表", "暂无播放列表", "创建", "取消", "添加到播放列表", "早上好", "下午好", "晚上好", "高音质")
-    "한국어" -> HStrings("플레이리스트", "노래", "아티스트", "앨범", "설정", "테마", "언어", "곧", "음악 없음", "라이브러리 업데이트", "알 수 없음", "알 수 없는 제목", "알 수 없는 아티스트", "새 플레이리스트", "플레이리스트 없음", "만들기", "취소", "플레이리스트에 추가", "좋은 아침입니다", "좋은 오후입니다", "좋은 저녁입니다", "HQ")
-    "العربية" -> HStrings("قوائم التشغيل", "أغاني", "فنانون", "ألبومات", "إعدادات", "السمة", "اللغة", "قريبًا", "لا توجد موسيقى", "تحديث المكتبة", "غير معروف", "عنوان غير معروف", "فنان غير معروف", "قائمة تشغيل جديدة", "لا توجد قوائم تشغيل", "إنشاء", "إلغاء", "إضافة إلى قائمة التشغيل", "صباح الخير", "مساء الخير", "مساء الخير", "جودة عالية")
-    "हिन्दी" -> HStrings("प्लेलिस्ट", "गाने", "कलाकार", "एल्बम", "सेटिंग्स", "थीम", "भाषा", "जल्द ही", "कोई संगीत नहीं", "लाइब्रेरी अपडेट करें", "अज्ञात", "अज्ञात शीर्षक", "अज्ञात कलाकार", "नई प्लेलिस्ट", "कोई प्लेलिस्ट नहीं", "बनाएं", "रद्द करें", "प्लेलिस्ट में जोड़ें", "सुप्रभात", "शुभ दोपहर", "शुभ संध्या", "HQ")
-    else -> HStrings("Playlists", "Canciones", "Artistas", "Álbumes", "Ajustes", "Tema", "Idioma", "Próximamente", "No hay música", "Actualizar Biblioteca", "Desconocido", "Título desconocido", "Artista desconocido", "Nueva Playlist", "No hay playlists todavía", "Crear", "Cancelar", "Añadir a la Playlist", "Buenos días", "Buenas tardes", "Buenas noches", "Alta calidad")
+    "English" -> HStrings("Playlists", "Songs", "Artists", "Albums", "Settings", "Theme", "Language", "Soon", "No music", "Update Library", "Unknown", "Unknown Title", "Unknown Artist", "New Playlist", "No playlists yet", "Create", "Cancel", "Add to Playlist", "Good morning", "Good afternoon", "Good evening", "HQ", "System", "Light", "Dark", "Update available", "New version found:", "Rename", "Delete")
+    "Français" -> HStrings("Playlists", "Chansons", "Artistes", "Albums", "Paramètres", "Thème", "Langue", "Bientôt", "Aucune musique", "Mettre à jour", "Inconnu", "Titre inconnu", "Artiste inconnu", "Nouvelle Playlist", "Aucune playlist", "Créer", "Annuler", "Ajouter à la playlist", "Bonjour", "Bon après-midi", "Bonsoir", "HQ", "Système", "Clair", "Sombre", "Mise à jour disponible", "Nouvelle version:", "Renommer", "Supprimer")
+    "Deutsch" -> HStrings("Playlists", "Lieder", "Künstler", "Alben", "Einstellungen", "Thema", "Sprache", "Bald", "Keine Musik", "Bibliothek aktualisieren", "Unbekannt", "Unbekannter Titel", "Unbekannter Künstler", "Neue Playlist", "Noch keine Playlists", "Erstellen", "Abbrechen", "Zur Playlist hinzufügen", "Guten Morgen", "Guten Tag", "Guten Abend", "HQ", "System", "Hell", "Dunkel", "Update verfügbar", "Neue Version:", "Umbenennen", "Löschen")
+    "Italiano" -> HStrings("Playlist", "Canzoni", "Artisti", "Album", "Impostazioni", "Tema", "Lingua", "Presto", "Nessuna musica", "Aggiorna libreria", "Sconosciuto", "Titolo sconosciuto", "Artista sconosciuto", "Nuova Playlist", "Nessuna playlist", "Creare", "Annulla", "Aggiungi alla playlist", "Buongiorno", "Buon pomeriggio", "Buonasera", "HQ", "Sistema", "Chiaro", "Scuro", "Aggiornamento disponibile", "Nuova versione:", "Rinomina", "Elimina")
+    "Português" -> HStrings("Playlists", "Músicas", "Artistas", "Álbuns", "Configurações", "Tema", "Idioma", "Em breve", "Nenhuma música", "Atualizar Biblioteca", "Desconhecido", "Título desconhecido", "Artista desconhecido", "Nova Playlist", "Nenhuma playlist ainda", "Criar", "Cancelar", "Adicionar à playlist", "Bom dia", "Boa tarde", "Boa noite", "HQ", "Sistema", "Claro", "Escuro", "Atualização disponível", "Nova versão:", "Renomear", "Excluir")
+    "日本語" -> HStrings("プレイリスト", "曲", "アーティスト", "アルバム", "設定", "テーマ", "言語", "もうすぐ", "音楽がありません", "ライブラリを更新", "不明", "不明なタイトル", "不明なアーティスト", "新しいプレイリスト", "プレイリストがありません", "作成", "キャンセル", "プレイリストに追加", "おはようございます", "こんにちは", "こんばんは", "高音質", "システム", "ライト", "ダーク", "利用可能なアップデート", "新しいバージョン：", "名前を変更", "削除")
+    "Русский" -> HStrings("Плейлисты", "Песни", "Исполнители", "Альбомы", "Настройки", "Тема", "Язык", "Скоро", "Нет музыки", "Обновить библиотеку", "Неизвестно", "Неизвестное название", "Неизвестный исполнитель", "Новый плейлист", "Нет плейлистов", "Создать", "Отмена", "Добавить в плейлист", "Доброе утро", "Добрый день", "Добрый вечер", "HQ", "Система", "Светлая", "Темная", "Доступно обновление", "Новая версия:", "Переименовать", "Удалить")
+    "中文" -> HStrings("播放列表", "歌曲", "艺术家", "专辑", "设置", "主题", "语言", "即将推出", "没有音乐", "更新库", "未知", "未知标题", "未知艺术家", "新播放列表", "暂无播放列表", "创建", "取消", "添加到播放列表", "早上好", "下午好", "晚上好", "高音质", "系统", "浅色", "深色", "可用更新", "新版本：", "重命名", "删除")
+    "한국어" -> HStrings("플레이리스트", "노래", "아티스트", "앨범", "설정", "테마", "언어", "곧", "음악 없음", "라이브러리 업데이트", "알 수 없음", "알 수 없는 제목", "알 수 없는 아티스트", "새 플레이리스트", "플레이리스트 없음", "만들기", "취소", "플레이리스트에 추가", "좋은 아침입니다", "좋은 오후입니다", "좋은 저녁입니다", "HQ", "시스템", "밝게", "어둡게", "업데이트 가능", "새 버전:", "이름 바꾸기", "삭제")
+    "العربية" -> HStrings("قوائم التشغيل", "أغاني", "فنانون", "ألبومات", "إعدادات", "السمة", "اللغة", "قريبًا", "لا توجد موسيقى", "تحديث المكتبة", "غير معروف", "عنوان غير معروف", "فنان غير معروف", "قائمة تشغيل جديدة", "لا توجد قوائم تشغيل", "إنشاء", "إلغاء", "إضافة إلى قائمة التشغيل", "صباح الخير", "مساء الخير", "مساء الخير", "جودة عالية", "النظام", "فاتح", "داكن", "تحديث متاح", "إصدار جديد:", "إعادة تسمية", "حذف")
+    "हिन्दी" -> HStrings("प्लेलिस्ट", "गाने", "कलाकार", "एल्बम", "सेटिंग्स", "थीम", "भाषा", "जल्द ही", "कोई संगीत नहीं", "लाइब्रेरी अपडेट करें", "अज्ञात", "अज्ञात शीर्षक", "अज्ञात कलाकार", "नई प्लेलिस्ट", "कोई प्लेलिस्ट नहीं", "बनाएं", "रद्द करें", "प्लेलिस्ट में जोड़ें", "सुप्रभात", "शुभ दोपहर", "शुभ संध्या", "HQ", "सिस्टम", "लाइट", "डार्क", "अपडेट उपलब्ध", "नया संस्करण:", "नाम बदलें", "हटाएं")
+    else -> HStrings("Playlists", "Canciones", "Artistas", "Álbumes", "Ajustes", "Tema", "Idioma", "Próximamente", "No hay música", "Actualizar Biblioteca", "Desconocido", "Título desconocido", "Artista desconocido", "Nueva Playlist", "No hay playlists todavía", "Crear", "Cancelar", "Añadir a la Playlist", "Buenos días", "Buenas tardes", "Buenas noches", "Alta calidad", "Sistema", "Claro", "Oscuro", "Actualización disponible", "Nueva versión encontrada:", "Renombrar", "Borrar")
 }
