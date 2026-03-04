@@ -4,8 +4,9 @@ import android.Manifest
 import android.content.ComponentName
 import android.content.ContentUris
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
-import android.graphics.BitmapFactory
+import android.content.res.Configuration
 import android.media.MediaScannerConnection
 import android.net.Uri
 import android.os.Build
@@ -20,9 +21,12 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.*
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -31,12 +35,14 @@ import androidx.compose.material.icons.automirrored.filled.PlaylistPlay
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.rememberVectorPainter
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.font.FontWeight
@@ -44,6 +50,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import androidx.core.util.Consumer
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.Player
@@ -67,16 +74,24 @@ class MainActivity : ComponentActivity() {
 
             val currentLanguage = if (languageSetting == "Sistema") {
                 when (Locale.getDefault().language) {
-                    "en" -> "English"; "fr" -> "Français"; "de" -> "Deutsch";
-                    "it" -> "Italiano"; "pt" -> "Português"; "ja" -> "日本語";
-                    "ru" -> "Русский"; "zh" -> "中文"; else -> "Español"
+                    "en" -> "English"
+                    "fr" -> "Français"
+                    "de" -> "Deutsch"
+                    "it" -> "Italiano"
+                    "pt" -> "Português"
+                    "ja" -> "日本語"
+                    "ru" -> "Русский"
+                    "zh" -> "中文"
+                    "ko" -> "한국어"
+                    "ar" -> "العربية"
+                    "hi" -> "हिन्दी"
+                    else -> "Español"
                 }
             } else languageSetting
 
             val s = getAppStrings(currentLanguage)
             val useDarkTheme = when (darkThemeSetting) { "Oscuro" -> true; "Claro" -> false; else -> isSystemInDarkTheme() }
 
-            // Saludo dinámico según la hora
             val currentHour = remember { Calendar.getInstance().get(Calendar.HOUR_OF_DAY) }
             val greetingText = when (currentHour) {
                 in 6..11 -> "☀️ ${s.goodMorning}"
@@ -89,15 +104,15 @@ class MainActivity : ComponentActivity() {
                 var songList by remember { mutableStateOf<List<Song>>(emptyList()) }
                 var selectedArtist by remember { mutableStateOf<String?>(null) }
                 var selectedPlaylist by remember { mutableStateOf<String?>(null) }
-                var selectedTab by remember { mutableIntStateOf(1) }
-                var showFullScreenPlayer by remember { mutableStateOf(false) }
+                var selectedTab by rememberSaveable { mutableIntStateOf(1) }
+                var showFullScreenPlayer by rememberSaveable { mutableStateOf(false) }
 
                 val playlists = remember { mutableStateListOf<String>().apply { addAll(getPlaylists(context)) } }
                 var showCreatePlaylistDialog by remember { mutableStateOf(false) }
                 var newPlaylistName by remember { mutableStateOf("") }
 
                 var exoPlayer by remember { mutableStateOf<Player?>(null) }
-                var currentMediaId by remember { mutableStateOf<String?>(null) }
+                var currentMediaId by rememberSaveable { mutableStateOf<String?>(null) }
                 val currentSong = songList.find { it.id.toString() == currentMediaId }
 
                 var title by remember { mutableStateOf<String?>(null) }
@@ -106,6 +121,21 @@ class MainActivity : ComponentActivity() {
                 var playbackPosition by remember { mutableLongStateOf(0L) }
                 var songDuration by remember { mutableLongStateOf(0L) }
 
+                val activity = LocalContext.current as ComponentActivity
+                LaunchedEffect(Unit) {
+                    if (activity.intent?.getBooleanExtra("open_player", false) == true) {
+                        showFullScreenPlayer = true
+                        activity.intent?.removeExtra("open_player")
+                    }
+                    val listener = Consumer<Intent> { newIntent ->
+                        if (newIntent.getBooleanExtra("open_player", false)) {
+                            showFullScreenPlayer = true
+                            newIntent.removeExtra("open_player")
+                        }
+                    }
+                    activity.addOnNewIntentListener(listener)
+                }
+
                 LaunchedEffect(Unit) {
                     try {
                         val sessionToken = SessionToken(context, ComponentName(context, PlaybackService::class.java))
@@ -113,6 +143,12 @@ class MainActivity : ComponentActivity() {
                         controllerFuture.addListener({
                             val controller = controllerFuture.get()
                             exoPlayer = controller
+                            currentMediaId = controller.currentMediaItem?.mediaId
+                            isPlaying = controller.isPlaying
+                            songDuration = controller.duration
+                            title = controller.mediaMetadata.title?.toString()
+                            artist = controller.mediaMetadata.artist?.toString()
+
                             controller.addListener(object : Player.Listener {
                                 override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
                                     currentMediaId = mediaItem?.mediaId
@@ -129,7 +165,7 @@ class MainActivity : ComponentActivity() {
                     } catch (e: Exception) {}
                 }
 
-                LaunchedEffect(isPlaying) { while (isPlaying) { playbackPosition = exoPlayer?.currentPosition ?: 0L; delay(1000) } }
+                LaunchedEffect(isPlaying) { while (isPlaying) { playbackPosition = exoPlayer?.currentPosition ?: 0L; delay(32) } }
 
                 val pReq = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) Manifest.permission.READ_MEDIA_AUDIO else Manifest.permission.READ_EXTERNAL_STORAGE
                 val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { if (it) songList = queryMusic(context, s) }
@@ -142,7 +178,7 @@ class MainActivity : ComponentActivity() {
                     AlertDialog(
                         onDismissRequest = { showCreatePlaylistDialog = false },
                         title = { Text(s.newPlaylist) },
-                        text = { OutlinedTextField(value = newPlaylistName, onValueChange = { newPlaylistName = it }, label = { Text("Nombre") }) },
+                        text = { OutlinedTextField(value = newPlaylistName, onValueChange = { newPlaylistName = it }, label = { Text(s.newPlaylist) }) },
                         confirmButton = {
                             TextButton(onClick = {
                                 if (newPlaylistName.isNotBlank()) {
@@ -159,20 +195,22 @@ class MainActivity : ComponentActivity() {
                 Scaffold(
                     modifier = Modifier.fillMaxSize(),
                     bottomBar = {
-                        NavigationBar {
-                            NavigationBarItem(icon = { Icon(Icons.AutoMirrored.Filled.PlaylistPlay, null) }, label = { Text(s.playlists) }, selected = selectedTab == 0, onClick = { selectedTab = 0; selectedPlaylist = null })
-                            NavigationBarItem(icon = { Icon(Icons.Default.Audiotrack, null) }, label = { Text(s.songs) }, selected = selectedTab == 1, onClick = { selectedTab = 1 })
-                            NavigationBarItem(icon = { Icon(Icons.Default.Person, null) }, label = { Text(s.artists) }, selected = selectedTab == 2, onClick = { selectedTab = 2; selectedArtist = null })
-                            NavigationBarItem(icon = { Icon(Icons.Default.Settings, null) }, label = { Text(s.settings) }, selected = selectedTab == 3, onClick = { selectedTab = 3 })
+                        if (!showFullScreenPlayer) {
+                            NavigationBar {
+                                NavigationBarItem(icon = { Icon(Icons.AutoMirrored.Filled.PlaylistPlay, null) }, label = { Text(s.playlists) }, selected = selectedTab == 0, onClick = { selectedTab = 0; selectedPlaylist = null })
+                                NavigationBarItem(icon = { Icon(Icons.Default.Audiotrack, null) }, label = { Text(s.songs) }, selected = selectedTab == 1, onClick = { selectedTab = 1 })
+                                NavigationBarItem(icon = { Icon(Icons.Default.Person, null) }, label = { Text(s.artists) }, selected = selectedTab == 2, onClick = { selectedTab = 2; selectedArtist = null })
+                                NavigationBarItem(icon = { Icon(Icons.Default.Settings, null) }, label = { Text(s.settings) }, selected = selectedTab == 3, onClick = { selectedTab = 3 })
+                            }
                         }
                     }
                 ) { pV ->
                     Column(modifier = Modifier.fillMaxSize().padding(pV)) {
                         Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
-                            Crossfade(targetState = selectedTab, label = "Tab") { tab ->
+                            Crossfade(targetState = selectedTab, label = "") { tab ->
                                 when (tab) {
-                                    0 -> { // PLAYLISTS
-                                        AnimatedContent(targetState = selectedPlaylist, label = "PlaylistAnim") { target ->
+                                    0 -> {
+                                        AnimatedContent(targetState = selectedPlaylist, label = "") { target ->
                                             if (target == null) {
                                                 Column(Modifier.fillMaxSize()) {
                                                     Button(onClick = { showCreatePlaylistDialog = true }, modifier = Modifier.fillMaxWidth().padding(16.dp)) { Icon(Icons.Default.Add, null); Spacer(Modifier.width(8.dp)); Text(s.newPlaylist) }
@@ -196,7 +234,7 @@ class MainActivity : ComponentActivity() {
                                                             FilledTonalButton(onClick = { playQueue(playlistSongs, 0, exoPlayer, true) }) { Icon(Icons.Default.PlayArrow, null); Text(" Mix") }
                                                         }
                                                     }
-                                                    if (playlistSongs.isEmpty()) Box(Modifier.fillMaxSize(), Alignment.Center) { Text("Vacía", color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                                                    if (playlistSongs.isEmpty()) Box(Modifier.fillMaxSize(), Alignment.Center) { Text(s.noMusic, color = MaterialTheme.colorScheme.onSurfaceVariant) }
                                                     else LazyColumn {
                                                         items(playlistSongs.size) { index ->
                                                             val song = playlistSongs[index]
@@ -207,16 +245,11 @@ class MainActivity : ComponentActivity() {
                                             }
                                         }
                                     }
-                                    1 -> { // CANCIONES CON SALUDO
+                                    1 -> {
                                         if (songList.isEmpty()) EmptyState(s) { scope.launch { forceMediaScan(context) { songList = queryMusic(context, s) } } }
                                         else {
                                             Column(Modifier.fillMaxSize()) {
-                                                Text(
-                                                    text = greetingText,
-                                                    style = MaterialTheme.typography.headlineMedium,
-                                                    fontWeight = FontWeight.ExtraBold,
-                                                    modifier = Modifier.padding(20.dp, 20.dp, 20.dp, 8.dp)
-                                                )
+                                                Text(text = greetingText, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.ExtraBold, modifier = Modifier.padding(20.dp, 20.dp, 20.dp, 8.dp))
                                                 LazyColumn(Modifier.fillMaxSize()) {
                                                     items(songList.size) { index ->
                                                         val song = songList[index]
@@ -226,8 +259,8 @@ class MainActivity : ComponentActivity() {
                                             }
                                         }
                                     }
-                                    2 -> { // ARTISTAS
-                                        AnimatedContent(targetState = selectedArtist, label = "ArtistAnim") { target ->
+                                    2 -> {
+                                        AnimatedContent(targetState = selectedArtist, label = "") { target ->
                                             if (target == null) {
                                                 LazyColumn(Modifier.fillMaxSize()) { items(songList.map { it.artist }.distinct().size) { index ->
                                                     val a = songList.map { it.artist }.distinct()[index]
@@ -259,7 +292,7 @@ class MainActivity : ComponentActivity() {
                             }
                         }
 
-                        AnimatedVisibility(visible = currentSong != null, enter = slideInVertically { it } + fadeIn()) {
+                        AnimatedVisibility(visible = currentSong != null && !showFullScreenPlayer, enter = slideInVertically { it } + fadeIn()) {
                             MiniPlayer(currentSong, isPlaying, { showFullScreenPlayer = true }, { if (isPlaying) exoPlayer?.pause() else exoPlayer?.play() }, (if (songDuration > 0) playbackPosition.toFloat() / songDuration.toFloat() else 0f), s)
                         }
                     }
@@ -276,11 +309,7 @@ class MainActivity : ComponentActivity() {
 fun playQueue(songs: List<Song>, startIndex: Int, player: Player?, shuffle: Boolean) {
     try {
         val mediaItems = songs.map { song ->
-            MediaItem.Builder()
-                .setUri(song.uri)
-                .setMediaId(song.id.toString())
-                .setMediaMetadata(MediaMetadata.Builder().setTitle(song.title).setArtist(song.artist).setArtworkUri(song.artworkUri).build())
-                .build()
+            MediaItem.Builder().setUri(song.uri).setMediaId(song.id.toString()).setMediaMetadata(MediaMetadata.Builder().setTitle(song.title).setArtist(song.artist).setArtworkUri(song.artworkUri).build()).build()
         }
         player?.setMediaItems(mediaItems, startIndex, 0L)
         player?.shuffleModeEnabled = shuffle
@@ -308,6 +337,22 @@ fun getSongsForPlaylist(ctx: Context, plName: String, allSongs: List<Song>): Lis
     return allSongs.filter { songIds.contains(it.id.toString()) }
 }
 
+data class LrcLine(val timeMs: Long, val text: String)
+fun parseLrc(lrc: String): List<LrcLine> {
+    val regex = Regex("""\[(\d{2,}):(\d{2})(?:\.(\d{1,3}))?\](.*)""")
+    return lrc.lines().mapNotNull { line ->
+        val match = regex.find(line)
+        if (match != null) {
+            val min = match.groupValues[1].toLong()
+            val sec = match.groupValues[2].toLong()
+            val msStr = match.groupValues[3]
+            val ms = if (msStr.isNotEmpty()) msStr.padEnd(3, '0').toLong() else 0L
+            val text = match.groupValues[4].trim()
+            LrcLine(min * 60000 + sec * 1000 + ms, text)
+        } else null
+    }
+}
+
 @Composable
 fun SettingsScreen(s: HStrings, darkT: String, onT: (String) -> Unit, lang: String, onL: (String) -> Unit) {
     val uriH = LocalUriHandler.current
@@ -318,11 +363,11 @@ fun SettingsScreen(s: HStrings, darkT: String, onT: (String) -> Unit, lang: Stri
         Spacer(Modifier.height(24.dp)); Text(s.language, fontWeight = FontWeight.Bold)
         @OptIn(ExperimentalLayoutApi::class)
         FlowRow(Modifier.padding(vertical = 8.dp)) {
-            listOf("Sistema", "Español", "English", "Français", "Deutsch", "Italiano", "Português", "日本語", "Русский", "中文").forEach { l -> FilterChip(selected = lang == l, onClick = { onL(l) }, label = { Text(l) }, modifier = Modifier.padding(end = 8.dp, bottom = 8.dp)) }
+            listOf("Sistema", "Español", "English", "Français", "Deutsch", "Italiano", "Português", "日本語", "Русский", "中文", "한국어", "العربية", "हिन्दी").forEach { l -> FilterChip(selected = lang == l, onClick = { onL(l) }, label = { Text(l) }, modifier = Modifier.padding(end = 8.dp, bottom = 8.dp)) }
         }
         Spacer(Modifier.weight(1f))
         Column(Modifier.fillMaxWidth().padding(top = 40.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-            Text("made with love ❤️🇪🇸", style = MaterialTheme.typography.bodySmall)
+            Text("made w/ love from 🇪🇸 <3", style = MaterialTheme.typography.bodySmall)
             Text("github.com/oriilol", Modifier.clickable { uriH.openUri("https://github.com/oriilol") }.padding(8.dp), color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
         }
     }
@@ -370,15 +415,59 @@ fun MiniPlayer(song: Song?, isPlaying: Boolean, onOpen: () -> Unit, onPlayPause:
 }
 
 @Composable
+fun LrcViewer(parsedLyrics: List<LrcLine>, currentPos: Long, onSeekTo: (Long) -> Unit) {
+    val listState = rememberLazyListState()
+    val activeIndex = parsedLyrics.indexOfLast { it.timeMs <= currentPos }.coerceAtLeast(0)
+
+    LaunchedEffect(activeIndex) {
+        if (activeIndex >= 0 && parsedLyrics.isNotEmpty()) {
+            listState.animateScrollToItem(activeIndex.coerceAtLeast(0), scrollOffset = -200)
+        }
+    }
+
+    LazyColumn(state = listState, modifier = Modifier.fillMaxSize().padding(16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+        items(parsedLyrics.size) { index ->
+            val line = parsedLyrics[index]
+            val isActive = index == activeIndex
+
+            val alpha by animateFloatAsState(targetValue = if (isActive) 1f else 0.4f, label = "")
+            val textSize by animateFloatAsState(targetValue = if (isActive) 24f else 18f, label = "")
+
+            Text(
+                text = line.text,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = alpha),
+                fontWeight = if (isActive) FontWeight.ExtraBold else FontWeight.Bold,
+                fontSize = textSize.sp,
+                lineHeight = (textSize * 1.3f).sp,
+                textAlign = TextAlign.Center,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 12.dp, horizontal = 8.dp)
+                    .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { onSeekTo(line.timeMs) }
+            )
+        }
+    }
+}
+
+@Composable
 fun FullScreenPlayer(song: Song?, isPlaying: Boolean, pos: Long, dur: Long, onClose: () -> Unit, onPlayPause: () -> Unit, onSeek: (Long) -> Unit, player: Player?, playlists: List<String>, s: HStrings) {
     BackHandler { onClose() }
     val context = LocalContext.current
     var showInfo by remember { mutableStateOf(false) }
-    var showLyrics by remember { mutableStateOf(false) }
+    var showLyrics by rememberSaveable { mutableStateOf(false) }
+    var isEditingLyrics by rememberSaveable { mutableStateOf(false) }
     var showAddPlaylist by remember { mutableStateOf(false) }
     var speed by remember { mutableFloatStateOf(1f) }
+
+    var isSliderDragging by remember { mutableStateOf(false) }
+    var sliderValue by remember { mutableFloatStateOf(0f) }
+
     val prefs = context.getSharedPreferences("lyrics_db", Context.MODE_PRIVATE)
     var lyricsText by remember(song) { mutableStateOf(prefs.getString("lyrics_${song?.id}", "") ?: "") }
+    val parsedLyrics = remember(lyricsText) { parseLrc(lyricsText) }
+
+    val configuration = LocalConfiguration.current
+    val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
 
     if (showInfo && song != null) {
         AlertDialog(onDismissRequest = { showInfo = false }, title = { Text("ℹ️ Info") }, text = { Column { Text("Formato: ${song.mimeType}"); Text("Tamaño: ${formatSize(song.size)}") } }, confirmButton = { TextButton(onClick = { showInfo = false }) { Text("OK") } })
@@ -400,34 +489,104 @@ fun FullScreenPlayer(song: Song?, isPlaying: Boolean, pos: Long, dur: Long, onCl
     }
 
     Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-        Column(modifier = Modifier.fillMaxSize().padding(horizontal = 32.dp, vertical = 48.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = onClose) { Icon(Icons.Default.KeyboardArrowDown, null, Modifier.size(36.dp)) }
-                Row {
-                    IconButton(onClick = { showAddPlaylist = true }) { Icon(Icons.Default.PlaylistAdd, null) }
-                    IconButton(onClick = { showInfo = true }) { Icon(Icons.Default.Info, null) }
+        if (isLandscape) {
+            Row(modifier = Modifier.fillMaxSize().padding(16.dp)) {
+                Box(modifier = Modifier.weight(1f).fillMaxHeight().clip(RoundedCornerShape(28.dp)).background(MaterialTheme.colorScheme.surfaceVariant), contentAlignment = Alignment.Center) {
+                    AnimatedContent(targetState = showLyrics, transitionSpec = { fadeIn() togetherWith fadeOut() }, label = "") { showingLyrics ->
+                        if (showingLyrics) {
+                            if (isEditingLyrics) OutlinedTextField(value = lyricsText, onValueChange = { lyricsText = it; prefs.edit().putString("lyrics_${song?.id}", it).apply() }, modifier = Modifier.fillMaxSize().padding(8.dp))
+                            else if (parsedLyrics.isNotEmpty()) LrcViewer(parsedLyrics, pos, onSeek)
+                            else if (lyricsText.isNotBlank()) Text(lyricsText, modifier = Modifier.padding(16.dp).verticalScroll(rememberScrollState()), textAlign = TextAlign.Center)
+                            else OutlinedTextField(value = lyricsText, onValueChange = { lyricsText = it; prefs.edit().putString("lyrics_${song?.id}", it).apply() }, modifier = Modifier.fillMaxSize().padding(8.dp), placeholder = { Text("Pega la letra o el archivo LRC aquí...") })
+                        } else AsyncImage(model = song?.artworkUri, contentDescription = null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop, error = rememberVectorPainter(Icons.Default.MusicNote))
+                    }
+                }
+                Spacer(Modifier.width(24.dp))
+                Column(modifier = Modifier.weight(1f).fillMaxHeight(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        IconButton(onClick = onClose) { Icon(Icons.Default.KeyboardArrowDown, null, Modifier.size(36.dp)) }
+                        Row {
+                            if (showLyrics) IconButton(onClick = { isEditingLyrics = !isEditingLyrics }) { Icon(Icons.Default.Edit, null) }
+                            IconButton(onClick = { showAddPlaylist = true }) { Icon(Icons.Default.PlaylistAdd, null) }
+                            IconButton(onClick = { showInfo = true }) { Icon(Icons.Default.Info, null) }
+                        }
+                    }
+                    Spacer(Modifier.weight(1f))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(song?.title ?: s.unknownTitle, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.ExtraBold, textAlign = TextAlign.Center, maxLines = 2)
+                        if (song?.mimeType?.contains("flac", true) == true || song?.mimeType?.contains("wav", true) == true) {
+                            Surface(color = MaterialTheme.colorScheme.tertiaryContainer, shape = RoundedCornerShape(8.dp), modifier = Modifier.padding(start = 8.dp)) { Text(s.hq, fontSize = 10.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp), color = MaterialTheme.colorScheme.onTertiaryContainer) }
+                        }
+                    }
+                    Text(song?.artist ?: s.unknownArtist, style = MaterialTheme.typography.titleLarge, color = MaterialTheme.colorScheme.primary, maxLines = 1)
+                    Spacer(Modifier.height(24.dp))
+                    Slider(
+                        value = if (isSliderDragging) sliderValue else (if (dur > 0) pos.toFloat() else 0f),
+                        onValueChange = { isSliderDragging = true; sliderValue = it },
+                        onValueChangeFinished = { isSliderDragging = false; onSeek(sliderValue.toLong()) },
+                        valueRange = 0f..(if (dur > 0) dur.toFloat() else 1f)
+                    )
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) { Text(formatTime(if (isSliderDragging) sliderValue.toLong() else pos), style = MaterialTheme.typography.bodySmall); Text(formatTime(dur), style = MaterialTheme.typography.bodySmall) }
+                    Spacer(Modifier.height(24.dp))
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
+                        TextButton(onClick = { speed = when (speed) { 1f -> 1.5f; 1.5f -> 2f; 2f -> 0.5f; else -> 1f }; player?.setPlaybackSpeed(speed) }) { Text("${speed}x", fontWeight = FontWeight.Bold, fontSize = 18.sp) }
+                        IconButton(onClick = { player?.seekToPreviousMediaItem() }) { Icon(Icons.Default.SkipPrevious, null, Modifier.size(36.dp)) }
+                        IconButton(onClick = onPlayPause, modifier = Modifier.size(80.dp).background(MaterialTheme.colorScheme.primary, CircleShape)) { Icon(if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow, null, modifier = Modifier.size(40.dp), tint = MaterialTheme.colorScheme.onPrimary) }
+                        IconButton(onClick = { player?.seekToNextMediaItem() }) { Icon(Icons.Default.SkipNext, null, Modifier.size(36.dp)) }
+                        IconButton(onClick = { showLyrics = !showLyrics }) { Icon(if (showLyrics) Icons.Default.Image else Icons.Default.Notes, null, Modifier.size(28.dp), tint = if (showLyrics) MaterialTheme.colorScheme.primary else LocalContentColor.current) }
+                    }
+                    Spacer(Modifier.weight(1f))
                 }
             }
-            Spacer(Modifier.weight(1f))
-            Box(modifier = Modifier.fillMaxWidth().aspectRatio(1f).clip(RoundedCornerShape(28.dp)).background(MaterialTheme.colorScheme.surfaceVariant), contentAlignment = Alignment.Center) {
-                if (showLyrics) OutlinedTextField(value = lyricsText, onValueChange = { lyricsText = it; prefs.edit().putString("lyrics_${song?.id}", it).apply() }, modifier = Modifier.fillMaxSize().padding(8.dp))
-                else AsyncImage(model = song?.artworkUri, contentDescription = null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop, error = rememberVectorPainter(Icons.Default.MusicNote))
+        } else {
+            Column(modifier = Modifier.fillMaxSize().padding(horizontal = 32.dp, vertical = 48.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(onClick = onClose) { Icon(Icons.Default.KeyboardArrowDown, null, Modifier.size(36.dp)) }
+                    Row {
+                        if (showLyrics) IconButton(onClick = { isEditingLyrics = !isEditingLyrics }) { Icon(Icons.Default.Edit, null) }
+                        IconButton(onClick = { showAddPlaylist = true }) { Icon(Icons.Default.PlaylistAdd, null) }
+                        IconButton(onClick = { showInfo = true }) { Icon(Icons.Default.Info, null) }
+                    }
+                }
+                Spacer(Modifier.weight(1f))
+                Box(modifier = Modifier.fillMaxWidth().aspectRatio(1f).clip(RoundedCornerShape(28.dp)).background(MaterialTheme.colorScheme.surfaceVariant), contentAlignment = Alignment.Center) {
+                    AnimatedContent(targetState = showLyrics, transitionSpec = { fadeIn() togetherWith fadeOut() }, label = "") { showingLyrics ->
+                        if (showingLyrics) {
+                            if (isEditingLyrics) OutlinedTextField(value = lyricsText, onValueChange = { lyricsText = it; prefs.edit().putString("lyrics_${song?.id}", it).apply() }, modifier = Modifier.fillMaxSize().padding(8.dp))
+                            else if (parsedLyrics.isNotEmpty()) LrcViewer(parsedLyrics, pos, onSeek)
+                            else if (lyricsText.isNotBlank()) Text(lyricsText, modifier = Modifier.padding(16.dp).verticalScroll(rememberScrollState()), textAlign = TextAlign.Center)
+                            else OutlinedTextField(value = lyricsText, onValueChange = { lyricsText = it; prefs.edit().putString("lyrics_${song?.id}", it).apply() }, modifier = Modifier.fillMaxSize().padding(8.dp), placeholder = { Text("Pega la letra o el archivo LRC aquí...") })
+                        } else AsyncImage(model = song?.artworkUri, contentDescription = null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop, error = rememberVectorPainter(Icons.Default.MusicNote))
+                    }
+                }
+                Spacer(Modifier.height(48.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(song?.title ?: s.unknownTitle, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.ExtraBold, textAlign = TextAlign.Center, maxLines = 2)
+                    if (song?.mimeType?.contains("flac", true) == true || song?.mimeType?.contains("wav", true) == true) {
+                        Surface(color = MaterialTheme.colorScheme.tertiaryContainer, shape = RoundedCornerShape(8.dp), modifier = Modifier.padding(start = 8.dp)) { Text(s.hq, fontSize = 10.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp), color = MaterialTheme.colorScheme.onTertiaryContainer) }
+                    }
+                }
+                Text(song?.artist ?: s.unknownArtist, style = MaterialTheme.typography.titleLarge, color = MaterialTheme.colorScheme.primary, maxLines = 1)
+                Spacer(Modifier.height(48.dp))
+
+                Slider(
+                    value = if (isSliderDragging) sliderValue else (if (dur > 0) pos.toFloat() else 0f),
+                    onValueChange = { isSliderDragging = true; sliderValue = it },
+                    onValueChangeFinished = { isSliderDragging = false; onSeek(sliderValue.toLong()) },
+                    valueRange = 0f..(if (dur > 0) dur.toFloat() else 1f)
+                )
+
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) { Text(formatTime(if (isSliderDragging) sliderValue.toLong() else pos), style = MaterialTheme.typography.bodySmall); Text(formatTime(dur), style = MaterialTheme.typography.bodySmall) }
+                Spacer(Modifier.height(24.dp))
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
+                    TextButton(onClick = { speed = when (speed) { 1f -> 1.5f; 1.5f -> 2f; 2f -> 0.5f; else -> 1f }; player?.setPlaybackSpeed(speed) }) { Text("${speed}x", fontWeight = FontWeight.Bold, fontSize = 18.sp) }
+                    IconButton(onClick = { player?.seekToPreviousMediaItem() }) { Icon(Icons.Default.SkipPrevious, null, Modifier.size(36.dp)) }
+                    IconButton(onClick = onPlayPause, modifier = Modifier.size(80.dp).background(MaterialTheme.colorScheme.primary, CircleShape)) { Icon(if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow, null, modifier = Modifier.size(40.dp), tint = MaterialTheme.colorScheme.onPrimary) }
+                    IconButton(onClick = { player?.seekToNextMediaItem() }) { Icon(Icons.Default.SkipNext, null, Modifier.size(36.dp)) }
+                    IconButton(onClick = { showLyrics = !showLyrics }) { Icon(if (showLyrics) Icons.Default.Image else Icons.Default.Notes, null, Modifier.size(28.dp), tint = if (showLyrics) MaterialTheme.colorScheme.primary else LocalContentColor.current) }
+                }
+                Spacer(Modifier.weight(1.2f))
             }
-            Spacer(Modifier.height(48.dp))
-            Text(song?.title ?: s.unknownTitle, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.ExtraBold, textAlign = TextAlign.Center, maxLines = 2)
-            Text(song?.artist ?: s.unknownArtist, style = MaterialTheme.typography.titleLarge, color = MaterialTheme.colorScheme.primary, maxLines = 1)
-            Spacer(Modifier.height(48.dp))
-            Slider(value = if (dur > 0) pos.toFloat() else 0f, onValueChange = { onSeek(it.toLong()) }, valueRange = 0f..(if (dur > 0) dur.toFloat() else 1f))
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) { Text(formatTime(pos), style = MaterialTheme.typography.bodySmall); Text(formatTime(dur), style = MaterialTheme.typography.bodySmall) }
-            Spacer(Modifier.height(24.dp))
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
-                TextButton(onClick = { speed = when (speed) { 1f -> 1.5f; 1.5f -> 2f; 2f -> 0.5f; else -> 1f }; player?.setPlaybackSpeed(speed) }) { Text("${speed}x", fontWeight = FontWeight.Bold, fontSize = 18.sp) }
-                IconButton(onClick = { player?.seekToPreviousMediaItem() }) { Icon(Icons.Default.SkipPrevious, null, Modifier.size(36.dp)) }
-                IconButton(onClick = onPlayPause, modifier = Modifier.size(80.dp).background(MaterialTheme.colorScheme.primary, CircleShape)) { Icon(if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow, null, modifier = Modifier.size(40.dp), tint = MaterialTheme.colorScheme.onPrimary) }
-                IconButton(onClick = { player?.seekToNextMediaItem() }) { Icon(Icons.Default.SkipNext, null, Modifier.size(36.dp)) }
-                IconButton(onClick = { showLyrics = !showLyrics }) { Icon(if (showLyrics) Icons.Default.Image else Icons.Default.Notes, null, Modifier.size(28.dp), tint = if (showLyrics) MaterialTheme.colorScheme.primary else LocalContentColor.current) }
-            }
-            Spacer(Modifier.weight(1.2f))
         }
     }
 }
@@ -478,17 +637,20 @@ data class HStrings(
     val theme: String, val language: String, val soon: String, val noMusic: String, val update: String,
     val unknown: String, val unknownTitle: String, val unknownArtist: String, val newPlaylist: String,
     val noPlaylists: String, val create: String, val cancel: String, val addToPlaylist: String,
-    val goodMorning: String, val goodAfternoon: String, val goodEvening: String
+    val goodMorning: String, val goodAfternoon: String, val goodEvening: String, val hq: String
 )
 
 fun getAppStrings(l: String): HStrings = when(l) {
-    "English" -> HStrings("Playlists", "Songs", "Artists", "Albums", "Settings", "Theme", "Language", "Soon", "No music", "Update Library", "Unknown", "Unknown Title", "Unknown Artist", "New Playlist", "No playlists yet", "Create", "Cancel", "Add to Playlist", "Good morning", "Good afternoon", "Good evening")
-    "Français" -> HStrings("Playlists", "Chansons", "Artistes", "Albums", "Paramètres", "Thème", "Langue", "Bientôt", "Aucune musique", "Mettre à jour", "Inconnu", "Titre inconnu", "Artiste inconnu", "Nouvelle Playlist", "Aucune playlist", "Créer", "Annuler", "Ajouter à la playlist", "Bonjour", "Bon après-midi", "Bonsoir")
-    "Deutsch" -> HStrings("Playlists", "Lieder", "Künstler", "Alben", "Einstellungen", "Thema", "Sprache", "Bald", "Keine Musik", "Bibliothek aktualisieren", "Unbekannt", "Unbekannter Titel", "Unbekannter Künstler", "Neue Playlist", "Noch keine Playlists", "Erstellen", "Abbrechen", "Zur Playlist hinzufügen", "Guten Morgen", "Guten Tag", "Guten Abend")
-    "Italiano" -> HStrings("Playlist", "Canzoni", "Artisti", "Album", "Impostazioni", "Tema", "Lingua", "Presto", "Nessuna musica", "Aggiorna libreria", "Sconosciuto", "Titolo sconosciuto", "Artista sconosciuto", "Nuova Playlist", "Nessuna playlist", "Creare", "Annulla", "Aggiungi alla playlist", "Buongiorno", "Buon pomeriggio", "Buonasera")
-    "Português" -> HStrings("Playlists", "Músicas", "Artistas", "Álbuns", "Configurações", "Tema", "Idioma", "Em breve", "Nenhuma música", "Atualizar Biblioteca", "Desconhecido", "Título desconhecido", "Artista desconhecido", "Nova Playlist", "Nenhuma playlist ainda", "Criar", "Cancelar", "Adicionar à playlist", "Bom dia", "Boa tarde", "Boa noite")
-    "日本語" -> HStrings("プレイリスト", "曲", "アーティスト", "アルバム", "設定", "テーマ", "言語", "もうすぐ", "音楽がありません", "ライブラリを更新", "不明", "不明なタイトル", "不明なアーティスト", "新しいプレイリスト", "プレイリストがありません", "作成", "キャンセル", "プレイリストに追加", "おはようございます", "こんにちは", "こんばんは")
-    "Русский" -> HStrings("Плейлисты", "Песни", "Исполнители", "Альбомы", "Настройки", "Тема", "Язык", "Скоро", "Нет музыки", "Обновить библиотеку", "Неизвестно", "Неизвестное название", "Неизвестный исполнитель", "Новый плейлист", "Нет плейлистов", "Создать", "Отмена", "Добавить в плейлист", "Доброе утро", "Добрый день", "Добрый вечер")
-    "中文" -> HStrings("播放列表", "歌曲", "艺术家", "专辑", "设置", "主题", "语言", "即将推出", "没有音乐", "更新库", "未知", "未知标题", "未知艺术家", "新播放列表", "暂无播放列表", "创建", "取消", "添加到播放列表", "早上好", "下午好", "晚上好")
-    else -> HStrings("Playlists", "Canciones", "Artistas", "Álbumes", "Ajustes", "Tema", "Idioma", "Próximamente", "No hay música", "Actualizar Biblioteca", "Desconocido", "Título desconocido", "Artista desconocido", "Nueva Playlist", "No hay playlists todavía", "Crear", "Cancelar", "Añadir a la Playlist", "Buenos días", "Buenas tardes", "Buenas noches")
+    "English" -> HStrings("Playlists", "Songs", "Artists", "Albums", "Settings", "Theme", "Language", "Soon", "No music", "Update Library", "Unknown", "Unknown Title", "Unknown Artist", "New Playlist", "No playlists yet", "Create", "Cancel", "Add to Playlist", "Good morning", "Good afternoon", "Good evening", "HQ")
+    "Français" -> HStrings("Playlists", "Chansons", "Artistes", "Albums", "Paramètres", "Thème", "Langue", "Bientôt", "Aucune musique", "Mettre à jour", "Inconnu", "Titre inconnu", "Artiste inconnu", "Nouvelle Playlist", "Aucune playlist", "Créer", "Annuler", "Ajouter à la playlist", "Bonjour", "Bon après-midi", "Bonsoir", "HQ")
+    "Deutsch" -> HStrings("Playlists", "Lieder", "Künstler", "Alben", "Einstellungen", "Thema", "Sprache", "Bald", "Keine Musik", "Bibliothek aktualisieren", "Unbekannt", "Unbekannter Titel", "Unbekannter Künstler", "Neue Playlist", "Noch keine Playlists", "Erstellen", "Abbrechen", "Zur Playlist hinzufügen", "Guten Morgen", "Guten Tag", "Guten Abend", "HQ")
+    "Italiano" -> HStrings("Playlist", "Canzoni", "Artisti", "Album", "Impostazioni", "Tema", "Lingua", "Presto", "Nessuna musica", "Aggiorna libreria", "Sconosciuto", "Titolo sconosciuto", "Artista sconosciuto", "Nuova Playlist", "Nessuna playlist", "Creare", "Annulla", "Aggiungi alla playlist", "Buongiorno", "Buon pomeriggio", "Buonasera", "HQ")
+    "Português" -> HStrings("Playlists", "Músicas", "Artistas", "Álbuns", "Configurações", "Tema", "Idioma", "Em breve", "Nenhuma música", "Atualizar Biblioteca", "Desconhecido", "Título desconhecido", "Artista desconhecido", "Nova Playlist", "Nenhuma playlist ainda", "Criar", "Cancelar", "Adicionar à playlist", "Bom dia", "Boa tarde", "Boa noite", "HQ")
+    "日本語" -> HStrings("プレイリスト", "曲", "アーティスト", "アルバム", "設定", "テーマ", "言語", "もうすぐ", "音楽がありません", "ライブラリを更新", "不明", "不明なタイトル", "不明なアーティスト", "新しいプレイリスト", "プレイリストがありません", "作成", "キャンセル", "プレイリストに追加", "おはようございます", "こんにちは", "こんばんは", "高音質")
+    "Русский" -> HStrings("Плейлисты", "Песни", "Исполнители", "Альбомы", "Настройки", "Тема", "Язык", "Скоро", "Нет музыки", "Обновить библиотеку", "Неизвестно", "Неизвестное название", "Неизвестный исполнитель", "Новый плейлист", "Нет плейлистов", "Создать", "Отмена", "Добавить в плейлист", "Доброе утро", "Добрый день", "Добрый вечер", "HQ")
+    "中文" -> HStrings("播放列表", "歌曲", "艺术家", "专辑", "设置", "主题", "语言", "即将推出", "没有音乐", "更新库", "未知", "未知标题", "未知艺术家", "新播放列表", "暂无播放列表", "创建", "取消", "添加到播放列表", "早上好", "下午好", "晚上好", "高音质")
+    "한국어" -> HStrings("플레이리스트", "노래", "아티스트", "앨범", "설정", "테마", "언어", "곧", "음악 없음", "라이브러리 업데이트", "알 수 없음", "알 수 없는 제목", "알 수 없는 아티스트", "새 플레이리스트", "플레이리스트 없음", "만들기", "취소", "플레이리스트에 추가", "좋은 아침입니다", "좋은 오후입니다", "좋은 저녁입니다", "HQ")
+    "العربية" -> HStrings("قوائم التشغيل", "أغاني", "فنانون", "ألبومات", "إعدادات", "السمة", "اللغة", "قريبًا", "لا توجد موسيقى", "تحديث المكتبة", "غير معروف", "عنوان غير معروف", "فنان غير معروف", "قائمة تشغيل جديدة", "لا توجد قوائم تشغيل", "إنشاء", "إلغاء", "إضافة إلى قائمة التشغيل", "صباح الخير", "مساء الخير", "مساء الخير", "جودة عالية")
+    "हिन्दी" -> HStrings("प्लेलिस्ट", "गाने", "कलाकार", "एल्बम", "सेटिंग्स", "थीम", "भाषा", "जल्द ही", "कोई संगीत नहीं", "लाइब्रेरी अपडेट करें", "अज्ञात", "अज्ञात शीर्षक", "अज्ञात कलाकार", "नई प्लेलिस्ट", "कोई प्लेलिस्ट नहीं", "बनाएं", "रद्द करें", "प्लेलिस्ट में जोड़ें", "सुप्रभात", "शुभ दोपहर", "शुभ संध्या", "HQ")
+    else -> HStrings("Playlists", "Canciones", "Artistas", "Álbumes", "Ajustes", "Tema", "Idioma", "Próximamente", "No hay música", "Actualizar Biblioteca", "Desconocido", "Título desconocido", "Artista desconocido", "Nueva Playlist", "No hay playlists todavía", "Crear", "Cancelar", "Añadir a la Playlist", "Buenos días", "Buenas tardes", "Buenas noches", "Alta calidad")
 }
