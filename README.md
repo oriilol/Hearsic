@@ -7,11 +7,6 @@
 
 **Hearsic** is a beautiful, fast, and feature-rich offline local music player for Android. Built from the ground up using modern Android development tools like **Jetpack Compose** and **Media3 (ExoPlayer)**, it brings a premium listening experience directly to your device without the need for an internet connection.
 
-<p align="center">
-  <img src="https://via.placeholder.com/250x500.png?text=Home+Screen" width="200" />
-  <img src="https://via.placeholder.com/250x500.png?text=Player+Screen" width="200" />
-  <img src="https://via.placeholder.com/250x500.png?text=Lyrics+Feature" width="200" />
-</p>
 
 ## ✨ Features
 
