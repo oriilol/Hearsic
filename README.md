@@ -31,7 +31,7 @@ This project was built using the recommended modern Android architecture:
 You can download the latest version of Hearsic directly from the Releases page:
 
 1. Go to the [Releases](../../releases) tab.
-2. Download the latest `Hearsic-v1.0.apk` file.
+2. Download the latest `Hearsic.apk` file.
 3. Open the file on your Android device and install it (you may need to allow "Install from unknown sources").
 4. Enjoy your music! 🎶
 
