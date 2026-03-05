@@ -55,6 +55,7 @@ import androidx.core.content.ContextCompat
 import androidx.core.util.Consumer
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
+import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
@@ -101,7 +102,7 @@ class MainActivity : ComponentActivity() {
             var updateUrl by remember { mutableStateOf<String?>(null) }
             var updateVersion by remember { mutableStateOf<String?>(null) }
             var versionStatus by remember { mutableIntStateOf(0) }
-            val currentAppVersion = "v1.2.1"
+            val currentAppVersion = "v1.2.2"
 
             LaunchedEffect(Unit) {
                 withContext(Dispatchers.IO) {
@@ -166,6 +167,9 @@ class MainActivity : ComponentActivity() {
                 var showRenameDialog by remember { mutableStateOf(false) }
                 var renamePlaylistText by remember { mutableStateOf("") }
 
+                var songOptionsFor by remember { mutableStateOf<Long?>(null) }
+                var forcePlaylistRefresh by remember { mutableIntStateOf(0) }
+
                 var exoPlayer by remember { mutableStateOf<Player?>(null) }
                 var currentMediaId by rememberSaveable { mutableStateOf<String?>(null) }
                 val currentSong = songList.find { it.id.toString() == currentMediaId }
@@ -177,6 +181,8 @@ class MainActivity : ComponentActivity() {
                 var songDuration by remember { mutableLongStateOf(0L) }
                 var hasNext by remember { mutableStateOf(false) }
                 var hasPrev by remember { mutableStateOf(false) }
+                var playbackError by remember { mutableStateOf(false) }
+                var showPermissionDialog by remember { mutableStateOf(false) }
 
                 val coverPickerLauncher = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
                     if (uri != null && selectedPlaylist != null) {
@@ -207,9 +213,36 @@ class MainActivity : ComponentActivity() {
                                 override fun onEvents(player: Player, events: Player.Events) {
                                     hasNext = player.hasNextMediaItem()
                                     hasPrev = player.hasPreviousMediaItem()
+
+                                    if (events.contains(Player.EVENT_TRACKS_CHANGED) || events.contains(Player.EVENT_PLAYBACK_STATE_CHANGED)) {
+                                        val groups = player.currentTracks.groups
+                                        if (groups.isNotEmpty() && player.currentMediaItem != null) {
+                                            var hasSupportedAudio = false
+                                            for (group in groups) {
+                                                if (group.type == androidx.media3.common.C.TRACK_TYPE_AUDIO && group.isSupported) {
+                                                    hasSupportedAudio = true
+                                                    break
+                                                }
+                                            }
+                                            if (!hasSupportedAudio) {
+                                                player.pause()
+                                                playbackError = true
+                                                if (events.contains(Player.EVENT_TRACKS_CHANGED)) {
+                                                    Toast.makeText(context, s.codecErrorToast, Toast.LENGTH_SHORT).show()
+                                                }
+                                            } else {
+                                                playbackError = false
+                                            }
+                                        }
+                                    }
+                                }
+                                override fun onPlayerError(error: PlaybackException) {
+                                    playbackError = true
+                                    Toast.makeText(context, s.codecErrorToast, Toast.LENGTH_SHORT).show()
                                 }
                                 override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
                                     currentMediaId = mediaItem?.mediaId
+                                    playbackError = false
                                 }
                                 override fun onMediaMetadataChanged(m: MediaMetadata) {
                                     val rT = m.title?.toString()
@@ -235,10 +268,31 @@ class MainActivity : ComponentActivity() {
                 }
 
                 val pReq = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) Manifest.permission.READ_MEDIA_AUDIO else Manifest.permission.READ_EXTERNAL_STORAGE
-                val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { if (it) songList = queryMusic(context, s) }
+                val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { isGranted ->
+                    if (isGranted) songList = queryMusic(context, s)
+                    else showPermissionDialog = true
+                }
                 LaunchedEffect(Unit) {
                     if (ContextCompat.checkSelfPermission(context, pReq) == PackageManager.PERMISSION_GRANTED) songList = queryMusic(context, s)
                     else launcher.launch(pReq)
+                }
+
+                if (showPermissionDialog) {
+                    AlertDialog(
+                        onDismissRequest = { showPermissionDialog = false },
+                        title = { Text(s.permissionDenied) },
+                        text = { Text(s.permissionMsg) },
+                        confirmButton = {
+                            TextButton(onClick = {
+                                showPermissionDialog = false
+                                val intent = Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                                    data = Uri.fromParts("package", context.packageName, null)
+                                }
+                                context.startActivity(intent)
+                            }) { Text(s.goToSettings) }
+                        },
+                        dismissButton = { TextButton(onClick = { showPermissionDialog = false }) { Text(s.cancel) } }
+                    )
                 }
 
                 if (updateUrl != null) {
@@ -246,7 +300,7 @@ class MainActivity : ComponentActivity() {
                         onDismissRequest = { updateUrl = null },
                         title = { Text(s.updateAvailable) },
                         text = { Text("${s.newVersion} $updateVersion") },
-                        confirmButton = { TextButton(onClick = { uriHandler.openUri(updateUrl!!); updateUrl = null }) { Text(s.update) } },
+                        confirmButton = { TextButton(onClick = { uriHandler.openUri(updateUrl!!); updateUrl = null }) { Text(s.updateApp) } },
                         dismissButton = { TextButton(onClick = { updateUrl = null }) { Text(s.cancel) } }
                     )
                 }
@@ -289,6 +343,22 @@ class MainActivity : ComponentActivity() {
                             }
                         },
                         confirmButton = { TextButton(onClick = { playlistOptionsFor = null }) { Text(s.cancel) } }
+                    )
+                }
+
+                if (songOptionsFor != null && selectedPlaylist != null) {
+                    AlertDialog(
+                        onDismissRequest = { songOptionsFor = null },
+                        title = { Text(s.removeFromPlaylist) },
+                        text = { Text(s.removeSongConfirmMsg) },
+                        confirmButton = {
+                            TextButton(onClick = {
+                                removeSongFromPlaylist(context, selectedPlaylist!!, songOptionsFor!!)
+                                songOptionsFor = null
+                                forcePlaylistRefresh++
+                            }) { Text(s.delete, color = MaterialTheme.colorScheme.error) }
+                        },
+                        dismissButton = { TextButton(onClick = { songOptionsFor = null }) { Text(s.cancel) } }
                     )
                 }
 
@@ -354,7 +424,8 @@ class MainActivity : ComponentActivity() {
                                                 }
                                             } else {
                                                 BackHandler { selectedPlaylist = null }
-                                                val playlistSongs = getSongsForPlaylist(context, target, songList)
+                                                val trigger = forcePlaylistRefresh
+                                                val playlistSongs = remember(target, trigger, songList) { getSongsForPlaylist(context, target, songList) }
                                                 Column(Modifier.fillMaxSize()) {
                                                     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(16.dp)) {
                                                         IconButton(onClick = { selectedPlaylist = null }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, null) }
@@ -368,7 +439,7 @@ class MainActivity : ComponentActivity() {
                                                     else LazyColumn(Modifier.fillMaxSize()) {
                                                         items(playlistSongs, key = { it.id }) { song ->
                                                             val index = playlistSongs.indexOf(song)
-                                                            SongRowSafe(song, s, currentMediaId == song.id.toString()) { playQueue(playlistSongs, index, exoPlayer, false) }
+                                                            SongRowSafe(song, s, currentMediaId == song.id.toString(), { playQueue(playlistSongs, index, exoPlayer, false) }, { songOptionsFor = song.id })
                                                         }
                                                     }
                                                 }
@@ -379,11 +450,20 @@ class MainActivity : ComponentActivity() {
                                         if (songList.isEmpty()) EmptyState(s) { scope.launch { forceMediaScan(context) { songList = queryMusic(context, s) } } }
                                         else {
                                             Column(Modifier.fillMaxSize()) {
-                                                Text(text = greetingText, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.ExtraBold, modifier = Modifier.padding(20.dp, 20.dp, 20.dp, 8.dp))
+                                                Row(
+                                                    modifier = Modifier.fillMaxWidth().padding(20.dp, 20.dp, 20.dp, 8.dp),
+                                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                                    verticalAlignment = Alignment.CenterVertically
+                                                ) {
+                                                    Text(text = greetingText, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.ExtraBold, modifier = Modifier.weight(1f))
+                                                    IconButton(onClick = { scope.launch { forceMediaScan(context) { songList = queryMusic(context, s) } } }) {
+                                                        Icon(Icons.Default.Refresh, contentDescription = null)
+                                                    }
+                                                }
                                                 LazyColumn(Modifier.fillMaxSize()) {
                                                     items(songList, key = { it.id }) { song ->
                                                         val index = songList.indexOf(song)
-                                                        SongRowSafe(song, s, currentMediaId == song.id.toString()) { playQueue(songList, index, exoPlayer, false) }
+                                                        SongRowSafe(song, s, currentMediaId == song.id.toString(), { playQueue(songList, index, exoPlayer, false) }, null)
                                                     }
                                                 }
                                             }
@@ -412,7 +492,7 @@ class MainActivity : ComponentActivity() {
                                                     LazyColumn(Modifier.fillMaxSize()) {
                                                         items(artistSongs, key = { it.id }) { song ->
                                                             val index = artistSongs.indexOf(song)
-                                                            SongRowSafe(song, s, currentMediaId == song.id.toString()) { playQueue(artistSongs, index, exoPlayer, false) }
+                                                            SongRowSafe(song, s, currentMediaId == song.id.toString(), { playQueue(artistSongs, index, exoPlayer, false) }, null)
                                                         }
                                                     }
                                                 }
@@ -433,13 +513,13 @@ class MainActivity : ComponentActivity() {
                         }
 
                         AnimatedVisibility(visible = currentSong != null && !showFullScreenPlayer, enter = slideInVertically { it } + fadeIn()) {
-                            MiniPlayer(currentSong, isPlaying, { showFullScreenPlayer = true }, { if (isPlaying) exoPlayer?.pause() else exoPlayer?.play() }, (if (songDuration > 0) playbackPosition.toFloat() / songDuration.toFloat() else 0f), s)
+                            MiniPlayer(currentSong, isPlaying, playbackError, { showFullScreenPlayer = true }, { if (isPlaying) exoPlayer?.pause() else exoPlayer?.play() }, (if (songDuration > 0) playbackPosition.toFloat() / songDuration.toFloat() else 0f), s)
                         }
                     }
                 }
 
                 AnimatedVisibility(visible = showFullScreenPlayer, enter = slideInVertically(initialOffsetY = { it }) + fadeIn(), exit = slideOutVertically(targetOffsetY = { it }) + fadeOut()) {
-                    FullScreenPlayer(currentSong, isPlaying, playbackPosition, songDuration, hasNext, hasPrev, { showFullScreenPlayer = false }, { if (isPlaying) exoPlayer?.pause() else exoPlayer?.play() }, { exoPlayer?.seekTo(it) }, exoPlayer, playlists, s)
+                    FullScreenPlayer(currentSong, isPlaying, playbackError, playbackPosition, songDuration, hasNext, hasPrev, { showFullScreenPlayer = false }, { if (isPlaying) exoPlayer?.pause() else exoPlayer?.play() }, { exoPlayer?.seekTo(it) }, exoPlayer, playlists, s)
                 }
             }
         }
@@ -448,12 +528,13 @@ class MainActivity : ComponentActivity() {
 
 fun playQueue(songs: List<Song>, startIndex: Int, player: Player?, shuffle: Boolean) {
     try {
-        val mediaItems = songs.map { song ->
+        val listToPlay = if (shuffle) songs.shuffled() else songs
+        val actualStartIndex = if (shuffle) 0 else startIndex
+        val mediaItems = listToPlay.map { song ->
             MediaItem.Builder().setUri(song.uri).setMediaId(song.id.toString()).setMediaMetadata(MediaMetadata.Builder().setTitle(song.title).setArtist(song.artist).setArtworkUri(song.artworkUri).build()).build()
         }
-        val actualStartIndex = if (shuffle && songs.isNotEmpty()) songs.indices.random() else startIndex
         player?.setMediaItems(mediaItems, actualStartIndex, 0L)
-        player?.shuffleModeEnabled = shuffle
+        player?.shuffleModeEnabled = false
         player?.setPlaybackSpeed(1f)
         player?.prepare()
         player?.play()
@@ -471,6 +552,12 @@ fun addSongToPlaylist(ctx: Context, plName: String, songId: Long) {
     val prefs = ctx.getSharedPreferences("hearsic_pl", Context.MODE_PRIVATE)
     val songs = prefs.getStringSet("pl_songs_$plName", emptySet())?.toMutableSet() ?: mutableSetOf()
     songs.add(songId.toString())
+    prefs.edit().putStringSet("pl_songs_$plName", songs).apply()
+}
+fun removeSongFromPlaylist(ctx: Context, plName: String, songId: Long) {
+    val prefs = ctx.getSharedPreferences("hearsic_pl", Context.MODE_PRIVATE)
+    val songs = prefs.getStringSet("pl_songs_$plName", emptySet())?.toMutableSet() ?: return
+    songs.remove(songId.toString())
     prefs.edit().putStringSet("pl_songs_$plName", songs).apply()
 }
 fun getSongsForPlaylist(ctx: Context, plName: String, allSongs: List<Song>): List<Song> {
@@ -555,10 +642,10 @@ fun SettingsScreen(s: HStrings, darkT: String, onT: (String) -> Unit, lang: Stri
 }
 
 @Composable
-fun SongRowSafe(song: Song, s: HStrings, isPlaying: Boolean, onClick: () -> Unit) {
+fun SongRowSafe(song: Song, s: HStrings, isPlaying: Boolean, onClick: () -> Unit, onLongClick: (() -> Unit)? = null) {
     val bgColor = if (isPlaying) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.3f) else Color.Transparent
     val txtColor = if (isPlaying) MaterialTheme.colorScheme.primary else Color.Unspecified
-    Row(modifier = Modifier.fillMaxWidth().background(bgColor).clickable { onClick() }.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+    Row(modifier = Modifier.fillMaxWidth().background(bgColor).pointerInput(Unit) { detectTapGestures(onTap = { onClick() }, onLongPress = { onLongClick?.invoke() }) }.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
         val fallbackIcon = rememberVectorPainter(image = Icons.Default.MusicNote)
         AsyncImage(model = song.artworkUri, contentDescription = null, modifier = Modifier.size(52.dp).clip(RoundedCornerShape(10.dp)).background(MaterialTheme.colorScheme.surfaceVariant), contentScale = ContentScale.Crop, error = fallbackIcon)
         Spacer(Modifier.width(16.dp))
@@ -579,8 +666,8 @@ fun ArtistRow(name: String, onClick: () -> Unit) {
 }
 
 @Composable
-fun MiniPlayer(song: Song?, isPlaying: Boolean, onOpen: () -> Unit, onPlayPause: () -> Unit, progress: Float, s: HStrings) {
-    val isUnsupported = song?.dataPath?.endsWith(".wma", true) == true
+fun MiniPlayer(song: Song?, isPlaying: Boolean, playbackError: Boolean, onOpen: () -> Unit, onPlayPause: () -> Unit, progress: Float, s: HStrings) {
+    val isUnsupported = song?.dataPath?.endsWith(".wma", true) == true || playbackError
     Column {
         if (!isUnsupported) {
             LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth().height(2.dp))
@@ -634,7 +721,7 @@ fun LrcViewer(parsedLyrics: List<LrcLine>, currentPos: Long, onSeek: (Long) -> U
 }
 
 @Composable
-fun FullScreenPlayer(song: Song?, isPlaying: Boolean, pos: Long, dur: Long, hasNext: Boolean, hasPrev: Boolean, onClose: () -> Unit, onPlayPause: () -> Unit, onSeek: (Long) -> Unit, player: Player?, playlists: List<String>, s: HStrings) {
+fun FullScreenPlayer(song: Song?, isPlaying: Boolean, playbackError: Boolean, pos: Long, dur: Long, hasNext: Boolean, hasPrev: Boolean, onClose: () -> Unit, onPlayPause: () -> Unit, onSeek: (Long) -> Unit, player: Player?, playlists: List<String>, s: HStrings) {
     BackHandler { onClose() }
     val context = LocalContext.current
     var showInfo by remember { mutableStateOf(false) }
@@ -645,7 +732,7 @@ fun FullScreenPlayer(song: Song?, isPlaying: Boolean, pos: Long, dur: Long, hasN
     var speed by remember { mutableFloatStateOf(1f) }
     var sliderPos by remember { mutableStateOf<Float?>(null) }
 
-    val isUnsupported = song?.dataPath?.endsWith(".wma", true) == true
+    val isUnsupported = song?.dataPath?.endsWith(".wma", true) == true || playbackError
 
     val prefs = context.getSharedPreferences("lyrics_db", Context.MODE_PRIVATE)
     var lyricsText by remember(song) { mutableStateOf(prefs.getString("lyrics_${song?.id}", "") ?: "") }
@@ -660,7 +747,8 @@ fun FullScreenPlayer(song: Song?, isPlaying: Boolean, pos: Long, dur: Long, hasN
     }
 
     if (showWhyUnsupported) {
-        AlertDialog(onDismissRequest = { showWhyUnsupported = false }, title = { Text(s.cannotPlay) }, text = { Text(s.unsupportedFormatMsg) }, confirmButton = { TextButton(onClick = { showWhyUnsupported = false }) { Text("OK") } })
+        val msg = if (song?.dataPath?.endsWith(".wma", true) == true) s.unsupportedFormatMsg else s.codecErrorMsg
+        AlertDialog(onDismissRequest = { showWhyUnsupported = false }, title = { Text(s.cannotPlay) }, text = { Text(msg) }, confirmButton = { TextButton(onClick = { showWhyUnsupported = false }) { Text("OK") } })
     }
 
     if (showAddPlaylist && song != null) {
@@ -683,7 +771,7 @@ fun FullScreenPlayer(song: Song?, isPlaying: Boolean, pos: Long, dur: Long, hasN
             Row(modifier = Modifier.fillMaxSize().padding(16.dp)) {
                 AnimatedContent(targetState = song, transitionSpec = { slideInHorizontally { it } + fadeIn() togetherWith slideOutHorizontally { -it } + fadeOut() }, label = "ArtworkLand", modifier = Modifier.weight(1f).fillMaxHeight()) { animSong ->
                     Box(modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(28.dp)).background(MaterialTheme.colorScheme.surfaceVariant), contentAlignment = Alignment.Center) {
-                        val isUnsuppAnim = animSong?.dataPath?.endsWith(".wma", true) == true
+                        val isUnsuppAnim = animSong?.dataPath?.endsWith(".wma", true) == true || playbackError
                         Crossfade(targetState = showLyrics && !isUnsuppAnim, label = "LyricsFade") { showL ->
                             if (showL) {
                                 if (isEditingLyrics) OutlinedTextField(value = lyricsText, onValueChange = { lyricsText = it; prefs.edit().putString("lyrics_${animSong?.id}", it).apply() }, modifier = Modifier.fillMaxSize().padding(8.dp))
@@ -763,7 +851,7 @@ fun FullScreenPlayer(song: Song?, isPlaying: Boolean, pos: Long, dur: Long, hasN
                 AnimatedContent(targetState = song, transitionSpec = { slideInHorizontally { it } + fadeIn() togetherWith slideOutHorizontally { -it } + fadeOut() }, label = "ArtworkAndInfoPort") { animSong ->
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Box(modifier = Modifier.fillMaxWidth().aspectRatio(1f).clip(RoundedCornerShape(28.dp)).background(MaterialTheme.colorScheme.surfaceVariant), contentAlignment = Alignment.Center) {
-                            val isUnsuppAnim = animSong?.dataPath?.endsWith(".wma", true) == true
+                            val isUnsuppAnim = animSong?.dataPath?.endsWith(".wma", true) == true || playbackError
                             Crossfade(targetState = showLyrics && !isUnsuppAnim, label = "LyricsFade") { showL ->
                                 if (showL) {
                                     if (isEditingLyrics) OutlinedTextField(value = lyricsText, onValueChange = { lyricsText = it; prefs.edit().putString("lyrics_${animSong?.id}", it).apply() }, modifier = Modifier.fillMaxSize().padding(8.dp))
@@ -830,7 +918,7 @@ fun EmptyState(s: HStrings, onScan: () -> Unit) {
     Column(Modifier.fillMaxSize(), Arrangement.Center, Alignment.CenterHorizontally) {
         Icon(Icons.Default.MusicOff, null, Modifier.size(100.dp), tint = MaterialTheme.colorScheme.primary.copy(0.1f))
         Text(s.noMusic, Modifier.padding(24.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Button(onClick = onScan) { Text(s.update) }
+        Button(onClick = onScan) { Text(s.updateLibrary) }
     }
 }
 
@@ -840,7 +928,7 @@ fun queryMusic(c: Context, s: HStrings): List<Song> {
     val sL = mutableListOf<Song>()
     val col = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL) else MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
     val proj = arrayOf(MediaStore.Audio.Media._ID, MediaStore.Audio.Media.TITLE, MediaStore.Audio.Media.ARTIST, MediaStore.Audio.Media.ALBUM_ID, MediaStore.Audio.Media.SIZE, MediaStore.Audio.Media.MIME_TYPE, MediaStore.Audio.Media.DATA)
-    val sel = "${MediaStore.Audio.Media.IS_MUSIC} != 0 OR ${MediaStore.Audio.Media.DATA} LIKE '%.wma'"
+    val sel = "${MediaStore.Audio.Media.IS_MUSIC} != 0 OR ${MediaStore.Audio.Media.DATA} LIKE '%.wma' OR ${MediaStore.Audio.Media.DATA} LIKE '%.m4a' OR ${MediaStore.Audio.Media.DATA} LIKE '%.alac'"
     try {
         c.contentResolver.query(col, proj, sel, null, null)?.use { cur ->
             val iC = cur.getColumnIndexOrThrow(MediaStore.Audio.Media._ID)
@@ -881,26 +969,27 @@ fun forceMediaScan(c: Context, onUpdate: () -> Unit) {
 
 data class HStrings(
     val playlists: String, val songs: String, val artists: String, val albums: String, val settings: String,
-    val theme: String, val language: String, val soon: String, val noMusic: String, val update: String,
+    val theme: String, val language: String, val soon: String, val noMusic: String, val updateLibrary: String,
     val unknown: String, val unknownTitle: String, val unknownArtist: String, val newPlaylist: String,
     val noPlaylists: String, val create: String, val cancel: String, val addToPlaylist: String,
     val goodMorning: String, val goodAfternoon: String, val goodEvening: String, val hq: String,
     val system: String, val light: String, val dark: String, val updateAvailable: String, val newVersion: String,
     val rename: String, val delete: String, val upToDate: String, val updateAvailableSetting: String, val unreleasedVersion: String,
-    val added: String, val format: String, val size: String, val pasteLyrics: String, val cannotPlay: String, val why: String, val unsupportedFormatMsg: String
+    val added: String, val format: String, val size: String, val pasteLyrics: String, val cannotPlay: String, val why: String, val unsupportedFormatMsg: String, val updateApp: String,
+    val permissionDenied: String, val permissionMsg: String, val goToSettings: String, val codecErrorToast: String, val codecErrorMsg: String, val removeFromPlaylist: String, val removeSongConfirmMsg: String
 )
 
 fun getAppStrings(l: String): HStrings = when(l) {
-    "English" -> HStrings("Playlists", "Songs", "Artists", "Albums", "Settings", "Theme", "Language", "Soon", "No music", "Update Library", "Unknown", "Unknown Title", "Unknown Artist", "New Playlist", "No playlists yet", "Create", "Cancel", "Add to Playlist", "Good morning", "Good afternoon", "Good evening", "HQ", "System", "Light", "Dark", "Update available", "New version found:", "Rename", "Delete", "You're up to date", "New update available!", "You are using an unreleased version", "Added", "Format", "Size", "Paste lyrics or LRC file here...", "Cannot play this file", "Why?", "The WMA format is proprietary to Microsoft. Google's native player on Android cannot read this file without advanced external decoders. Please convert the file to MP3 or FLAC.")
-    "Français" -> HStrings("Playlists", "Chansons", "Artistes", "Albums", "Paramètres", "Thème", "Langue", "Bientôt", "Aucune musique", "Mettre à jour", "Inconnu", "Titre inconnu", "Artiste inconnu", "Nouvelle Playlist", "Aucune playlist", "Créer", "Annuler", "Ajouter à la playlist", "Bonjour", "Bon après-midi", "Bonsoir", "HQ", "Système", "Clair", "Sombre", "Mise à jour disponible", "Nouvelle version:", "Renommer", "Supprimer", "Vous êtes à jour", "Nouvelle mise à jour disponible !", "Vous utilisez une version non publiée", "Ajouté", "Format", "Taille", "Collez les paroles ou le fichier LRC ici...", "Impossible de lire ce fichier", "Pourquoi ?", "Le format WMA est la propriété de Microsoft. Le lecteur natif de Google sur Android ne peut pas lire ce fichier sans décodeurs externes avancés. Veuillez convertir le fichier en MP3 ou FLAC.")
-    "Deutsch" -> HStrings("Playlists", "Lieder", "Künstler", "Alben", "Einstellungen", "Thema", "Sprache", "Bald", "Keine Musik", "Bibliothek aktualisieren", "Unbekannt", "Unbekannter Titel", "Unbekannter Künstler", "Neue Playlist", "Noch keine Playlists", "Erstellen", "Abbrechen", "Zur Playlist hinzufügen", "Guten Morgen", "Guten Tag", "Guten Abend", "HQ", "System", "Hell", "Dunkel", "Update verfügbar", "Neue Version:", "Umbenennen", "Löschen", "Sie sind auf dem neuesten Stand", "Neues Update verfügbar!", "Sie verwenden eine unveröffentlichte Version", "Hinzugefügt", "Format", "Größe", "Fügen Sie hier Liedtexte oder LRC-Dateien ein...", "Kann diese Datei nicht abspielen", "Warum?", "Das WMA-Format ist Eigentum von Microsoft. Der native Player von Google auf Android kann diese Datei ohne erweiterte externe Decoder nicht lesen. Bitte konvertieren Sie die Datei in MP3 oder FLAC.")
-    "Italiano" -> HStrings("Playlist", "Canzoni", "Artisti", "Album", "Impostazioni", "Tema", "Lingua", "Presto", "Nessuna musica", "Aggiorna libreria", "Sconosciuto", "Titolo sconosciuto", "Artista sconosciuto", "Nuova Playlist", "Nessuna playlist", "Creare", "Annulla", "Aggiungi alla playlist", "Buongiorno", "Buon pomeriggio", "Buonasera", "HQ", "Sistema", "Chiaro", "Scuro", "Aggiornamento disponibile", "Nuova versione:", "Rinomina", "Elimina", "Sei aggiornato", "Nuovo aggiornamento disponibile!", "Stai utilizzando una versione non pubblicata", "Aggiunto", "Formato", "Dimensione", "Incolla qui il testo o il file LRC...", "Impossibile riprodurre", "Perché?", "Il formato WMA è di proprietà di Microsoft. Il lettore nativo di Google su Android non può leggere questo file senza decodificatori esterni avanzati. Si prega di convertire il file in MP3 o FLAC.")
-    "Português" -> HStrings("Playlists", "Músicas", "Artistas", "Álbuns", "Configurações", "Tema", "Idioma", "Em breve", "Nenhuma música", "Atualizar Biblioteca", "Desconhecido", "Título desconhecido", "Artista desconhecido", "Nova Playlist", "Nenhuma playlist ainda", "Criar", "Cancelar", "Adicionar à playlist", "Bom dia", "Boa tarde", "Boa noite", "HQ", "Sistema", "Claro", "Escuro", "Atualização disponível", "Nova versão:", "Renomear", "Excluir", "Você está atualizado", "Nova atualização disponível!", "Você está usando uma versão não lançada", "Adicionado", "Formato", "Tamanho", "Cole as letras ou o arquivo LRC aqui...", "Não é possível reproduzir", "Por quê?", "O formato WMA é propriedade da Microsoft. O reprodutor nativo do Google no Android não pode ler este arquivo sem decodificadores externos avançados. Por favor, converta o arquivo para MP3 ou FLAC.")
-    "日本語" -> HStrings("プレイリスト", "曲", "アーティスト", "アルバム", "設定", "テーマ", "言語", "もうすぐ", "音楽がありません", "ライブラリを更新", "不明", "不明なタイトル", "不明なアーティスト", "新しいプレイリスト", "プレイリストがありません", "作成", "キャンセル", "プレイリストに追加", "おはようございます", "こんにちは", "こんばんは", "高音質", "システム", "ライト", "ダーク", "利用可能なアップデート", "新しいバージョン：", "名前を変更", "削除", "最新の状態です", "新しいアップデートがあります！", "未リリースのバージョンを使用しています", "追加しました", "フォーマット", "サイズ", "ここに歌詞またはLRCファイルを貼り付けます...", "再生できません", "なぜですか？", "WMA形式はMicrosoftの独自仕様です。Android上のGoogleの標準プレーヤーでは、高度な外部デコーダーなしではこのファイルを読み取ることができません。MP3またはFLACに変換してください。")
-    "Русский" -> HStrings("Плейлисты", "Песни", "Исполнители", "Альбомы", "Настройки", "Тема", "Язык", "Скоро", "Нет музыки", "Обновить библиотеку", "Неизвестно", "Неизвестное название", "Неизвестный исполнитель", "Новый плейлист", "Нет плейлистов", "Создать", "Отмена", "Добавить в плейлист", "Доброе утро", "Добрый день", "Добрый вечер", "HQ", "Система", "Светлая", "Темная", "Доступно обновление", "Новая версия:", "Переименовать", "Удалить", "У вас последняя версия", "Доступно новое обновление!", "Вы используете невыпущенную версию", "Добавлено", "Формат", "Размер", "Вставьте сюда текст или файл LRC...", "Невозможно воспроизвести", "Почему?", "Формат WMA является собственностью Microsoft. Стандартный плеер Google на Android не может прочитать этот файл без дополнительных внешних декодеров. Пожалуйста, конвертируйте файл в MP3 или FLAC.")
-    "中文" -> HStrings("播放列表", "歌曲", "艺术家", "专辑", "设置", "主题", "语言", "即将推出", "没有音乐", "更新库", "未知", "未知标题", "未知艺术家", "新播放列表", "暂无播放列表", "创建", "取消", "添加到播放列表", "早上好", "下午好", "晚上好", "高音质", "系统", "浅色", "深色", "可用更新", "新版本：", "重命名", "删除", "您已是最新版本", "有新更新可用！", "您正在使用未发布的版本", "已添加", "格式", "大小", "在此处粘贴歌词或 LRC 文件...", "无法播放", "为什么？", "WMA 格式是 Microsoft 的专有格式。如果没有高级外部解码器，Android 上的 Google 原生播放器无法读取此文件。请将文件转换为 MP3 或 FLAC。")
-    "한국어" -> HStrings("플레이리스트", "노래", "아티스트", "앨범", "설정", "테마", "언어", "곧", "음악 없음", "라이브러리 업데이트", "알 수 없음", "알 수 없는 제목", "알 수 없는 아티스트", "새 플레이리스트", "플레이리스트 없음", "만들기", "취소", "플레이리스트에 추가", "좋은 아침입니다", "좋은 오후입니다", "좋은 저녁입니다", "HQ", "시스템", "밝게", "어둡게", "업데이트 가능", "새 버전:", "이름 바꾸기", "삭제", "최신 버전입니다", "새로운 업데이트가 있습니다!", "출시되지 않은 버전을 사용 중입니다", "추가됨", "형식", "크기", "여기에 가사 또는 LRC 파일 붙여넣기...", "재생할 수 없음", "왜요?", "WMA 형식은 Microsoft의 독점 형식입니다. Android의 Google 기본 플레이어는 고급 외부 디코더 없이는 이 파일을 읽을 수 없습니다. 파일을 MP3 또는 FLAC로 변환하세요.")
-    "العربية" -> HStrings("قوائم التشغيل", "أغاني", "فنانون", "ألبومات", "إعدادات", "السمة", "اللغة", "قريبًا", "لا توجد موسيقى", "تحديث المكتبة", "غير معروف", "عنوان غير معروف", "فنان غير معروف", "قائمة تشغيل جديدة", "لا توجد قوائم تشغيل", "إنشاء", "إلغاء", "إضافة إلى قائمة التشغيل", "صباح الخير", "مساء الخير", "مساء الخير", "جودة عالية", "النظام", "فاتح", "داكن", "تحديث متاح", "إصدار جديد:", "إعادة تسمية", "حذف", "أنت على أحدث إصدار", "تحديث جديد متاح!", "أنت تستخدم إصدار غير منشور", "تمت الإضافة", "التنسيق", "الحجم", "الصق الكلمات أو ملف LRC هنا...", "لا يمكن تشغيل الملف", "لماذا؟", "تنسيق WMA مملوك لشركة Microsoft. لا يمكن لمشغل Google الأساسي على Android قراءة هذا الملف بدون وحدات فك ترميز خارجية متقدمة. يرجى تحويل الملف إلى MP3 أو FLAC.")
-    "हिन्दी" -> HStrings("प्लेलिस्ट", "गाने", "कलाकार", "एल्बम", "सेटिंग्स", "थीम", "भाषा", "जल्द ही", "कोई संगीत नहीं", "लाइब्रेरी अपडेट करें", "अज्ञात", "अज्ञात शीर्षक", "अज्ञात कलाकार", "नई प्लेलिस्ट", "कोई प्लेलिस्ट नहीं", "बनाएं", "रद्द करें", "प्लेलिस्ट में जोड़ें", "सुप्रभात", "शुभ दोपहर", "शुभ संध्या", "HQ", "सिस्टम", "लाइट", "डार्क", "अपडेट उपलब्ध", "नया संस्करण:", "नाम बदलें", "हटाएं", "आप अप टू डेट हैं", "नया अपडेट उपलब्ध है!", "आप एक अप्रकाशित संस्करण का उपयोग कर रहे हैं", "जोड़ा गया", "प्रारूप", "आकार", "यहां गीत या LRC फ़ाइल चिपकाएं...", "यह फ़ाइल नहीं चला सकते", "क्यों?", "WMA प्रारूप Microsoft के स्वामित्व में है। Android पर Google का मूल प्लेयर उन्नत बाहरी डिकोडर के बिना इस फ़ाइल को नहीं पढ़ सकता है। कृपया फ़ाइल को MP3 या FLAC में बदलें।")
-    else -> HStrings("Playlists", "Canciones", "Artistas", "Álbumes", "Ajustes", "Tema", "Idioma", "Próximamente", "No hay música", "Actualizar Biblioteca", "Desconocido", "Título desconocido", "Artista desconocido", "Nueva Playlist", "No hay playlists todavía", "Crear", "Cancelar", "Añadir a la Playlist", "Buenos días", "Buenas tardes", "Buenas noches", "Alta calidad", "Sistema", "Claro", "Oscuro", "Actualización disponible", "Nueva versión encontrada:", "Renombrar", "Borrar", "Estás al día", "¡Nueva actualización disponible!", "Estás usando una versión no publicada", "Añadida", "Formato", "Tamaño", "Pega la letra o el archivo LRC aquí...", "Este archivo no se puede reproducir", "¿Por qué?", "El formato WMA está patentado por Microsoft. El reproductor nativo de Google en Android no puede leer este archivo por motivos legales. Te recomendamos convertirlo a formato MP3 o FLAC.")
+    "English" -> HStrings("Playlists", "Songs", "Artists", "Albums", "Settings", "Theme", "Language", "Soon", "No music", "Update Library", "Unknown", "Unknown Title", "Unknown Artist", "New Playlist", "No playlists yet", "Create", "Cancel", "Add to Playlist", "Good morning", "Good afternoon", "Good evening", "HQ", "System", "Light", "Dark", "Update available", "New version found:", "Rename", "Delete", "You're up to date", "New update available!", "You are using an unreleased version", "Added", "Format", "Size", "Paste lyrics or LRC file here...", "Cannot play this file", "Why?", "The WMA format is proprietary to Microsoft. Google's native player on Android cannot read this file without advanced external decoders. Please convert the file to MP3 or FLAC.", "Update", "Permission denied", "Hearsic needs storage access to find music. Please grant it in settings.", "Go to Settings", "Playback failed (likely Apple codec)", "This file uses an Apple codec (like ALAC) or is corrupted and cannot be read by the native player. Please convert it to MP3 or FLAC.", "Remove from playlist", "Do you want to remove this song from the playlist?")
+    "Français" -> HStrings("Playlists", "Chansons", "Artistes", "Albums", "Paramètres", "Thème", "Langue", "Bientôt", "Aucune musique", "Mettre à jour la bibliothèque", "Inconnu", "Titre inconnu", "Artiste inconnu", "Nouvelle Playlist", "Aucune playlist", "Créer", "Annuler", "Ajouter à la playlist", "Bonjour", "Bon après-midi", "Bonsoir", "HQ", "Système", "Clair", "Sombre", "Mise à jour disponible", "Nouvelle version:", "Renommer", "Supprimer", "Vous êtes à jour", "Nouvelle mise à jour disponible !", "Vous utilisez une version non publiée", "Ajouté", "Format", "Taille", "Collez les paroles ou le fichier LRC ici...", "Impossible de lire ce fichier", "Pourquoi ?", "Le format WMA est la propriété de Microsoft. Le lecteur natif de Google sur Android ne peut pas lire ce fichier sans décodeurs externes avancés. Veuillez convertir le fichier en MP3 ou FLAC.", "Mettre à jour", "Permission refusée", "Hearsic a besoin d'accéder à votre stockage pour trouver de la musique. Veuillez l'accorder dans les paramètres.", "Paramètres", "Échec de lecture (probablement codec Apple)", "Ce fichier utilise un codec Apple (comme ALAC) ou est corrompu et ne peut pas être lu. Veuillez le convertir en MP3 ou FLAC.", "Retirer de la playlist", "Voulez-vous retirer cette chanson de la playlist ?")
+    "Deutsch" -> HStrings("Playlists", "Lieder", "Künstler", "Alben", "Einstellungen", "Thema", "Sprache", "Bald", "Keine Musik", "Bibliothek aktualisieren", "Unbekannt", "Unbekannter Titel", "Unbekannter Künstler", "Neue Playlist", "Noch keine Playlists", "Erstellen", "Abbrechen", "Zur Playlist hinzufügen", "Guten Morgen", "Guten Tag", "Guten Abend", "HQ", "System", "Hell", "Dunkel", "Update verfügbar", "Neue Version:", "Umbenennen", "Löschen", "Sie sind auf dem neuesten Stand", "Neues Update verfügbar!", "Sie verwenden eine unveröffentlichte Version", "Hinzugefügt", "Format", "Größe", "Fügen Sie hier Liedtexte oder LRC-Dateien ein...", "Kann diese Datei nicht abspielen", "Warum?", "Das WMA-Format ist Eigentum von Microsoft. Der native Player von Google auf Android kann diese Datei ohne erweiterte externe Decoder nicht lesen. Bitte konvertieren Sie die Datei in MP3 oder FLAC.", "Aktualisieren", "Zugriff verweigert", "Hearsic benötigt Zugriff auf Ihren Speicher, um Musik zu finden. Bitte in den Einstellungen zulassen.", "Einstellungen", "Wiedergabe fehlgeschlagen (wahrscheinlich Apple-Codec)", "Diese Datei verwendet einen Apple-Codec (wie ALAC) oder ist beschädigt und kann nicht gelesen werden. Bitte in MP3 oder FLAC konvertieren.", "Aus Playlist entfernen", "Möchten Sie dieses Lied aus der Playlist entfernen?")
+    "Italiano" -> HStrings("Playlist", "Canzoni", "Artisti", "Album", "Impostazioni", "Tema", "Lingua", "Presto", "Nessuna musica", "Aggiorna libreria", "Sconosciuto", "Titolo sconosciuto", "Artista sconosciuto", "Nuova Playlist", "Nessuna playlist", "Creare", "Annulla", "Aggiungi alla playlist", "Buongiorno", "Buon pomeriggio", "Buonasera", "HQ", "Sistema", "Chiaro", "Scuro", "Aggiornamento disponibile", "Nuova versione:", "Rinomina", "Elimina", "Sei aggiornato", "Nuovo aggiornamento disponibile!", "Stai utilizzando una versione non pubblicata", "Aggiunto", "Formato", "Dimensione", "Incolla qui il testo o il file LRC...", "Impossibile riprodurre", "Perché?", "Il formato WMA è di proprietà di Microsoft. Il lettore nativo di Google su Android non può leggere questo file senza decodificatori esterni avanzati. Si prega di convertire il file in MP3 o FLAC.", "Aggiorna", "Permesso negato", "Hearsic deve accedere alla memoria per trovare la musica. Concedi il permesso nelle impostazioni.", "Impostazioni", "Riproduzione fallita (probabile codec Apple)", "Questo file usa un codec Apple (come ALAC) o è danneggiato e non può essere letto. Convertilo in MP3 o FLAC.", "Rimuovi dalla playlist", "Vuoi rimuovere questa canzone dalla playlist?")
+    "Português" -> HStrings("Playlists", "Músicas", "Artistas", "Álbuns", "Configurações", "Tema", "Idioma", "Em breve", "Nenhuma música", "Atualizar Biblioteca", "Desconhecido", "Título desconhecido", "Artista desconhecido", "Nova Playlist", "Nenhuma playlist ainda", "Criar", "Cancelar", "Adicionar à playlist", "Bom dia", "Boa tarde", "Boa noite", "HQ", "Sistema", "Claro", "Escuro", "Atualização disponível", "Nova versão:", "Renomear", "Excluir", "Você está atualizado", "Nova atualização disponível!", "Você está usando uma versão não lançada", "Adicionado", "Formato", "Tamanho", "Cole as letras ou o arquivo LRC aqui...", "Não é possível reproduzir", "Por quê?", "O formato WMA é propriedade da Microsoft. O reprodutor nativo do Google no Android não pode ler este arquivo sem decodificadores externos avançados. Por favor, converta o arquivo para MP3 ou FLAC.", "Atualizar", "Permissão negada", "O Hearsic precisa de acesso ao armazenamento para encontrar músicas. Conceda nas configurações.", "Configurações", "Falha na reprodução (provável codec Apple)", "Este arquivo usa um codec da Apple (como ALAC) ou está corrompido e não pode ser lido. Converta-o para MP3 ou FLAC.", "Remover da playlist", "Deseja remover esta música da playlist?")
+    "日本語" -> HStrings("プレイリスト", "曲", "アーティスト", "アルバム", "設定", "テーマ", "言語", "もうすぐ", "音楽がありません", "ライブラリを更新", "不明", "不明なタイトル", "不明なアーティスト", "新しいプレイリスト", "プレイリストがありません", "作成", "キャンセル", "プレイリストに追加", "おはようございます", "こんにちは", "こんばんは", "高音質", "システム", "ライト", "ダーク", "利用可能なアップデート", "新しいバージョン：", "名前を変更", "削除", "最新の状態です", "新しいアップデートがあります！", "未リリースのバージョンを使用しています", "追加しました", "フォーマット", "サイズ", "ここに歌詞またはLRCファイルを貼り付けます...", "再生できません", "なぜですか？", "WMA形式はMicrosoftの独自仕様です。Android上のGoogleの標準プレーヤーでは、高度な外部デコーダーなしではこのファイルを読み取ることができません。MP3またはFLACに変換してください。", "アップデート", "権限が拒否されました", "Hearsicが音楽を検索するにはストレージへのアクセスが必要です。設定で許可してください。", "設定へ移動", "再生失敗（Appleコーデックの可能性）", "このファイルはAppleコーデック（ALACなど）を使用しているか、破損しているため読み取れません。MP3またはFLACに変換してください。", "プレイリストから削除", "この曲をプレイリストから削除しますか？")
+    "Русский" -> HStrings("Плейлисты", "Песни", "Исполнители", "Альбомы", "Настройки", "Тема", "Язык", "Скоро", "Нет музыки", "Обновить библиотеку", "Неизвестно", "Неизвестное название", "Неизвестный исполнитель", "Новый плейлист", "Нет плейлистов", "Создать", "Отмена", "Добавить в плейлист", "Доброе утро", "Добрый день", "Добрый вечер", "HQ", "Система", "Светлая", "Темная", "Доступно обновление", "Новая версия:", "Переименовать", "Удалить", "У вас последняя версия", "Доступно новое обновление!", "Вы используете невыпущенную версию", "Добавлено", "Формат", "Размер", "Вставьте сюда текст или файл LRC...", "Невозможно воспроизвести", "Почему?", "Формат WMA является собственностью Microsoft. Стандартный плеер Google на Android не может прочитать этот файл без дополнительных внешних декодеров. Пожалуйста, конвертируйте файл в MP3 или FLAC.", "Обновить", "В доступе отказано", "Hearsic нужен доступ к памяти для поиска музыки. Разрешите его в настройках.", "Настройки", "Ошибка (вероятно, кодек Apple)", "Этот файл использует кодек Apple (например, ALAC) или поврежден и не может быть прочитан. Конвертируйте в MP3 или FLAC.", "Удалить из плейлиста", "Вы хотите удалить эту песню из плейлиста?")
+    "中文" -> HStrings("播放列表", "歌曲", "艺术家", "专辑", "设置", "主题", "语言", "即将推出", "没有音乐", "更新库", "未知", "未知标题", "未知艺术家", "新播放列表", "暂无播放列表", "创建", "取消", "添加到播放列表", "早上好", "下午好", "晚上好", "高音质", "系统", "浅色", "深色", "可用更新", "新版本：", "重命名", "删除", "您已是最新版本", "有新更新可用！", "您正在使用未发布的版本", "已添加", "格式", "大小", "在此处粘贴歌词或 LRC 文件...", "无法播放", "为什么？", "WMA 格式是 Microsoft 的专有格式。如果没有高级外部解码器，Android 上的 Google 原生播放器无法读取此文件。请将文件转换为 MP3 或 FLAC。", "更新", "权限被拒绝", "Hearsic 需要访问您的存储空间才能查找音乐。请在设置中授予权限。", "去设置", "播放失败（可能是 Apple 编解码器）", "此文件使用 Apple 编解码器（如 ALAC）或已损坏，无法读取。请转换为 MP3 或 FLAC。", "从播放列表中删除", "您要从播放列表中删除此歌曲吗？")
+    "한국어" -> HStrings("플레이리스트", "노래", "아티스트", "앨범", "설정", "테마", "언어", "곧", "음악 없음", "라이브러리 업데이트", "알 수 없음", "알 수 없는 제목", "알 수 없는 아티스트", "새 플레이리스트", "플레이리스트 없음", "만들기", "취소", "플레이리스트에 추가", "좋은 아침입니다", "좋은 오후입니다", "좋은 저녁입니다", "HQ", "시스템", "밝게", "어둡게", "업데이트 가능", "새 버전:", "이름 바꾸기", "삭제", "최신 버전입니다", "새로운 업데이트가 있습니다!", "출시되지 않은 버전을 사용 중입니다", "추가됨", "형식", "크기", "여기에 가사 또는 LRC 파일 붙여넣기...", "재생할 수 없음", "왜요?", "WMA 형식은 Microsoft의 독점 형식입니다. Android의 Google 기본 플레이어는 고급 외부 디코더 없이는 이 파일을 읽을 수 없습니다. 파일을 MP3 또는 FLAC로 변환하세요.", "업데이트", "권한 거부됨", "Hearsic이 음악을 찾으려면 저장소 액세스 권한이 필요합니다. 설정에서 허용해주세요.", "설정", "재생 실패 (Apple 코덱 가능성)", "이 파일은 Apple 코덱(예: ALAC)을 사용하거나 손상되어 읽을 수 없습니다. MP3 또는 FLAC로 변환하세요.", "플레이리스트에서 제거", "플레이리스트에서 이 노래를 제거하시겠습니까?")
+    "العربية" -> HStrings("قوائم التشغيل", "أغاني", "فنانون", "ألبومات", "إعدادات", "السمة", "اللغة", "قريبًا", "لا توجد موسيقى", "تحديث المكتبة", "غير معروف", "عنوان غير معروف", "فنان غير معروف", "قائمة تشغيل جديدة", "لا توجد قوائم تشغيل", "إنشاء", "إلغاء", "إضافة إلى قائمة التشغيل", "صباح الخير", "مساء الخير", "مساء الخير", "جودة عالية", "النظام", "فاتح", "داكن", "تحديث متاح", "إصدار جديد:", "إعادة تسمية", "حذف", "أنت على أحدث إصدار", "تحديث جديد متاح!", "أنت تستخدم إصدار غير منشور", "تمت الإضافة", "التنسيق", "الحجم", "الصق الكلمات أو ملف LRC هنا...", "لا يمكن تشغيل الملف", "لماذا؟", "تنسيق WMA مملوك لشركة Microsoft. لا يمكن لمشغل Google الأساسي على Android قراءة هذا الملف بدون وحدات فك ترميز خارجية متقدمة. يرجى تحويل الملف إلى MP3 أو FLAC.", "تحديث", "تم رفض الإذن", "يحتاج Hearsic إلى الوصول إلى مساحة التخزين الخاصة بك للعثور على الموسيقى. يرجى منحه في الإعدادات.", "الإعدادات", "فشل التشغيل (ربما ترميز Apple)", "يستخدم هذا الملف ترميز Apple (مثل ALAC) أو تالف ولا يمكن قراءته. يرجى تحويله إلى MP3 أو FLAC.", "إزالة من قائمة التشغيل", "هل تريد إزالة هذه الأغنية من قائمة التشغيل؟")
+    "हिन्दी" -> HStrings("प्लेलिस्ट", "गाने", "कलाकार", "एल्बम", "सेटिंग्स", "थीम", "भाषा", "जल्द ही", "कोई संगीत नहीं", "लाइब्रेरी अपडेट करें", "अज्ञात", "अज्ञात शीर्षक", "अज्ञात कलाकार", "नई प्लेलिस्ट", "कोई प्लेलिस्ट नहीं", "बनाएं", "रद्द करें", "प्लेलिस्ट में जोड़ें", "सुप्रभात", "शुभ दोपहर", "शुभ संध्या", "HQ", "सिस्टम", "लाइट", "डार्क", "अपडेट उपलब्ध", "नया संस्करण:", "नाम बदलें", "हटाएं", "आप अप टू डेट हैं", "नया अपडेट उपलब्ध है!", "आप एक अप्रकाशित संस्करण का उपयोग कर रहे हैं", "जोड़ा गया", "प्रारूप", "आकार", "यहां गीत या LRC फ़ाइल चिपकाएं...", "यह फ़ाइल नहीं चला सकते", "क्यों?", "WMA प्रारूप Microsoft के स्वामित्व में है। Android पर Google का मूल प्लेयर उन्नत बाहरी डिकोडर के बिना इस फ़ाइल को नहीं पढ़ सकता है। कृपया फ़ाइल को MP3 या FLAC में बदलें।", "अपडेट करें", "अनुमति अस्वीकृत", "Hearsic को संगीत खोजने के लिए स्टोरेज तक पहुंच की आवश्यकता है। कृपया इसे सेटिंग्स में अनुमति दें।", "सेटिंग्स", "प्लेबैक विफल (संभवतः Apple कोडेक)", "यह फ़ाइल Apple कोडेक (जैसे ALAC) का उपयोग करती है या दूषित है और इसे पढ़ा नहीं जा सकता है। कृपया इसे MP3 या FLAC में बदलें।", "प्लेलिस्ट से हटाएं", "क्या आप इस गाने को प्लेलिस्ट से हटाना चाहते हैं?")
+    else -> HStrings("Playlists", "Canciones", "Artistas", "Álbumes", "Ajustes", "Tema", "Idioma", "Próximamente", "No hay música", "Actualizar Biblioteca", "Desconocido", "Título desconocido", "Artista desconocido", "Nueva Playlist", "No hay playlists todavía", "Crear", "Cancelar", "Añadir a la Playlist", "Buenos días", "Buenas tardes", "Buenas noches", "Alta calidad", "Sistema", "Claro", "Oscuro", "Actualización disponible", "Nueva versión encontrada:", "Renombrar", "Borrar", "Estás al día", "¡Nueva actualización disponible!", "Estás usando una versión no publicada", "Añadida", "Formato", "Tamaño", "Pega la letra o el archivo LRC aquí...", "Este archivo no se puede reproducir", "¿Por qué?", "El formato WMA está patentado por Microsoft. El reproductor nativo de Google en Android no puede leer este archivo por motivos legales. Te recomendamos convertirlo a formato MP3 o FLAC.", "Actualizar", "Permiso denegado", "Hearsic necesita acceder a tu almacenamiento para buscar música. Por favor, concédelo en los ajustes.", "Ir a Ajustes", "Reproducción fallida (probablemente códec de Apple)", "Este archivo usa un códec de Apple (como ALAC) o está corrupto y el reproductor nativo no puede leerlo. Conviértelo a MP3 o FLAC.", "Eliminar de la playlist", "¿Quieres eliminar esta canción de la playlist?")
 }
