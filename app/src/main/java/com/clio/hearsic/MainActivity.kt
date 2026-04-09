@@ -28,6 +28,8 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -60,6 +62,8 @@ import androidx.media3.common.Player
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
 import coil.compose.AsyncImage
+import coil.request.CachePolicy
+import coil.request.ImageRequest
 import com.clio.hearsic.ui.theme.HearsicTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -102,7 +106,7 @@ class MainActivity : ComponentActivity() {
             var updateUrl by remember { mutableStateOf<String?>(null) }
             var updateVersion by remember { mutableStateOf<String?>(null) }
             var versionStatus by remember { mutableIntStateOf(0) }
-            val currentAppVersion = "v1.2.2"
+            val currentAppVersion = "v1.2.3"
 
             LaunchedEffect(Unit) {
                 withContext(Dispatchers.IO) {
@@ -172,7 +176,11 @@ class MainActivity : ComponentActivity() {
 
                 var exoPlayer by remember { mutableStateOf<Player?>(null) }
                 var currentMediaId by rememberSaveable { mutableStateOf<String?>(null) }
-                val currentSong = songList.find { it.id.toString() == currentMediaId }
+
+                var currentQueue by remember { mutableStateOf<List<Song>>(emptyList()) }
+                var currentIndex by remember { mutableIntStateOf(0) }
+
+                val currentSong = currentQueue.getOrNull(currentIndex) ?: songList.find { it.id.toString() == currentMediaId }
 
                 var title by remember { mutableStateOf<String?>(null) }
                 var artist by remember { mutableStateOf<String?>(null) }
@@ -202,6 +210,7 @@ class MainActivity : ComponentActivity() {
                             val controller = controllerFuture.get()
                             exoPlayer = controller
                             currentMediaId = controller.currentMediaItem?.mediaId
+                            currentIndex = controller.currentMediaItemIndex
                             isPlaying = controller.isPlaying
                             songDuration = if (controller.duration < 0) 0L else controller.duration
                             title = controller.mediaMetadata.title?.toString()
@@ -242,6 +251,7 @@ class MainActivity : ComponentActivity() {
                                 }
                                 override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
                                     currentMediaId = mediaItem?.mediaId
+                                    currentIndex = controller.currentMediaItemIndex
                                     playbackError = false
                                 }
                                 override fun onMediaMetadataChanged(m: MediaMetadata) {
@@ -412,7 +422,10 @@ class MainActivity : ComponentActivity() {
                                                             Row(modifier = Modifier.fillMaxWidth().pointerInput(Unit) { detectTapGestures(onTap = { selectedPlaylist = p }, onLongPress = { playlistOptionsFor = p }) }.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
                                                                 Box(Modifier.size(56.dp).clip(RoundedCornerShape(8.dp)).background(MaterialTheme.colorScheme.secondaryContainer), Alignment.Center) {
                                                                     if (coverUri != null && forceRecompose >= 0) {
-                                                                        AsyncImage(model = Uri.parse(coverUri), contentDescription = null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                                                                        AsyncImage(
+                                                                            model = ImageRequest.Builder(LocalContext.current).data(Uri.parse(coverUri)).crossfade(true).memoryCachePolicy(CachePolicy.ENABLED).diskCachePolicy(CachePolicy.ENABLED).build(),
+                                                                            contentDescription = null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop
+                                                                        )
                                                                     } else {
                                                                         Icon(Icons.AutoMirrored.Filled.PlaylistPlay, null)
                                                                     }
@@ -432,14 +445,14 @@ class MainActivity : ComponentActivity() {
                                                         Text(target, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
                                                         IconButton(onClick = { coverPickerLauncher.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) }) { Icon(Icons.Default.AddPhotoAlternate, null) }
                                                         if (playlistSongs.isNotEmpty()) {
-                                                            FilledTonalButton(onClick = { playQueue(playlistSongs, 0, exoPlayer, true) }) { Icon(Icons.Default.PlayArrow, null); Text(" Mix") }
+                                                            FilledTonalButton(onClick = { playQueue(playlistSongs, 0, exoPlayer, true) { q, i -> currentQueue = q; currentIndex = i } }) { Icon(Icons.Default.PlayArrow, null); Text(" Mix") }
                                                         }
                                                     }
                                                     if (playlistSongs.isEmpty()) Box(Modifier.fillMaxSize(), Alignment.Center) { Text(s.noMusic, color = MaterialTheme.colorScheme.onSurfaceVariant) }
                                                     else LazyColumn(Modifier.fillMaxSize()) {
                                                         items(playlistSongs, key = { it.id }) { song ->
                                                             val index = playlistSongs.indexOf(song)
-                                                            SongRowSafe(song, s, currentMediaId == song.id.toString(), { playQueue(playlistSongs, index, exoPlayer, false) }, { songOptionsFor = song.id })
+                                                            SongRowSafe(song, s, currentMediaId == song.id.toString(), { playQueue(playlistSongs, index, exoPlayer, false) { q, i -> currentQueue = q; currentIndex = i } }, { songOptionsFor = song.id })
                                                         }
                                                     }
                                                 }
@@ -463,7 +476,7 @@ class MainActivity : ComponentActivity() {
                                                 LazyColumn(Modifier.fillMaxSize()) {
                                                     items(songList, key = { it.id }) { song ->
                                                         val index = songList.indexOf(song)
-                                                        SongRowSafe(song, s, currentMediaId == song.id.toString(), { playQueue(songList, index, exoPlayer, false) }, null)
+                                                        SongRowSafe(song, s, currentMediaId == song.id.toString(), { playQueue(songList, index, exoPlayer, false) { q, i -> currentQueue = q; currentIndex = i } }, null)
                                                     }
                                                 }
                                             }
@@ -486,13 +499,13 @@ class MainActivity : ComponentActivity() {
                                                         IconButton(onClick = { selectedArtist = null }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, null) }
                                                         Text(target, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
                                                         if (artistSongs.isNotEmpty()) {
-                                                            FilledTonalButton(onClick = { playQueue(artistSongs, 0, exoPlayer, true) }) { Icon(Icons.Default.PlayArrow, null); Text(" Mix") }
+                                                            FilledTonalButton(onClick = { playQueue(artistSongs, 0, exoPlayer, true) { q, i -> currentQueue = q; currentIndex = i } }) { Icon(Icons.Default.PlayArrow, null); Text(" Mix") }
                                                         }
                                                     }
                                                     LazyColumn(Modifier.fillMaxSize()) {
                                                         items(artistSongs, key = { it.id }) { song ->
                                                             val index = artistSongs.indexOf(song)
-                                                            SongRowSafe(song, s, currentMediaId == song.id.toString(), { playQueue(artistSongs, index, exoPlayer, false) }, null)
+                                                            SongRowSafe(song, s, currentMediaId == song.id.toString(), { playQueue(artistSongs, index, exoPlayer, false) { q, i -> currentQueue = q; currentIndex = i } }, null)
                                                         }
                                                     }
                                                 }
@@ -519,14 +532,14 @@ class MainActivity : ComponentActivity() {
                 }
 
                 AnimatedVisibility(visible = showFullScreenPlayer, enter = slideInVertically(initialOffsetY = { it }) + fadeIn(), exit = slideOutVertically(targetOffsetY = { it }) + fadeOut()) {
-                    FullScreenPlayer(currentSong, isPlaying, playbackError, playbackPosition, songDuration, hasNext, hasPrev, { showFullScreenPlayer = false }, { if (isPlaying) exoPlayer?.pause() else exoPlayer?.play() }, { exoPlayer?.seekTo(it) }, exoPlayer, playlists, s)
+                    FullScreenPlayer(currentQueue, currentIndex, isPlaying, playbackError, playbackPosition, songDuration, hasNext, hasPrev, { showFullScreenPlayer = false }, { if (isPlaying) exoPlayer?.pause() else exoPlayer?.play() }, { exoPlayer?.seekTo(it) }, exoPlayer, playlists, s)
                 }
             }
         }
     }
 }
 
-fun playQueue(songs: List<Song>, startIndex: Int, player: Player?, shuffle: Boolean) {
+fun playQueue(songs: List<Song>, startIndex: Int, player: Player?, shuffle: Boolean, onQueueUpdate: (List<Song>, Int) -> Unit) {
     try {
         val listToPlay = if (shuffle) songs.shuffled() else songs
         val actualStartIndex = if (shuffle) 0 else startIndex
@@ -538,6 +551,7 @@ fun playQueue(songs: List<Song>, startIndex: Int, player: Player?, shuffle: Bool
         player?.setPlaybackSpeed(1f)
         player?.prepare()
         player?.play()
+        onQueueUpdate(listToPlay, actualStartIndex)
     } catch (e: Exception) {}
 }
 
@@ -647,7 +661,10 @@ fun SongRowSafe(song: Song, s: HStrings, isPlaying: Boolean, onClick: () -> Unit
     val txtColor = if (isPlaying) MaterialTheme.colorScheme.primary else Color.Unspecified
     Row(modifier = Modifier.fillMaxWidth().background(bgColor).pointerInput(Unit) { detectTapGestures(onTap = { onClick() }, onLongPress = { onLongClick?.invoke() }) }.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
         val fallbackIcon = rememberVectorPainter(image = Icons.Default.MusicNote)
-        AsyncImage(model = song.artworkUri, contentDescription = null, modifier = Modifier.size(52.dp).clip(RoundedCornerShape(10.dp)).background(MaterialTheme.colorScheme.surfaceVariant), contentScale = ContentScale.Crop, error = fallbackIcon)
+        AsyncImage(
+            model = ImageRequest.Builder(LocalContext.current).data(song.artworkUri).crossfade(true).memoryCachePolicy(CachePolicy.ENABLED).diskCachePolicy(CachePolicy.ENABLED).build(),
+            contentDescription = null, modifier = Modifier.size(52.dp).clip(RoundedCornerShape(10.dp)).background(MaterialTheme.colorScheme.surfaceVariant), contentScale = ContentScale.Crop, error = fallbackIcon
+        )
         Spacer(Modifier.width(16.dp))
         Column(Modifier.weight(1f)) {
             Text(if (song.title == "Desconocido") s.unknownTitle else song.title, fontWeight = FontWeight.Bold, maxLines = 1, fontSize = 16.sp, color = txtColor)
@@ -674,7 +691,10 @@ fun MiniPlayer(song: Song?, isPlaying: Boolean, playbackError: Boolean, onOpen: 
         }
         Row(modifier = Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceColorAtElevation(4.dp)).clickable { onOpen() }.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
             val fallbackIcon = rememberVectorPainter(image = Icons.Default.MusicNote)
-            AsyncImage(model = song?.artworkUri, contentDescription = null, modifier = Modifier.size(50.dp).clip(RoundedCornerShape(8.dp)).background(MaterialTheme.colorScheme.secondaryContainer), contentScale = ContentScale.Crop, error = fallbackIcon)
+            AsyncImage(
+                model = ImageRequest.Builder(LocalContext.current).data(song?.artworkUri).crossfade(true).memoryCachePolicy(CachePolicy.ENABLED).diskCachePolicy(CachePolicy.ENABLED).build(),
+                contentDescription = null, modifier = Modifier.size(50.dp).clip(RoundedCornerShape(8.dp)).background(MaterialTheme.colorScheme.secondaryContainer), contentScale = ContentScale.Crop, error = fallbackIcon
+            )
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
                 Text(song?.title ?: s.unknownTitle, fontWeight = FontWeight.Bold, maxLines = 1, fontSize = 14.sp)
@@ -721,7 +741,7 @@ fun LrcViewer(parsedLyrics: List<LrcLine>, currentPos: Long, onSeek: (Long) -> U
 }
 
 @Composable
-fun FullScreenPlayer(song: Song?, isPlaying: Boolean, playbackError: Boolean, pos: Long, dur: Long, hasNext: Boolean, hasPrev: Boolean, onClose: () -> Unit, onPlayPause: () -> Unit, onSeek: (Long) -> Unit, player: Player?, playlists: List<String>, s: HStrings) {
+fun FullScreenPlayer(queue: List<Song>, currentIndex: Int, isPlaying: Boolean, playbackError: Boolean, pos: Long, dur: Long, hasNext: Boolean, hasPrev: Boolean, onClose: () -> Unit, onPlayPause: () -> Unit, onSeek: (Long) -> Unit, player: Player?, playlists: List<String>, s: HStrings) {
     BackHandler { onClose() }
     val context = LocalContext.current
     var showInfo by remember { mutableStateOf(false) }
@@ -732,6 +752,7 @@ fun FullScreenPlayer(song: Song?, isPlaying: Boolean, playbackError: Boolean, po
     var speed by remember { mutableFloatStateOf(1f) }
     var sliderPos by remember { mutableStateOf<Float?>(null) }
 
+    val song = queue.getOrNull(currentIndex)
     val isUnsupported = song?.dataPath?.endsWith(".wma", true) == true || playbackError
 
     val prefs = context.getSharedPreferences("lyrics_db", Context.MODE_PRIVATE)
@@ -741,6 +762,20 @@ fun FullScreenPlayer(song: Song?, isPlaying: Boolean, playbackError: Boolean, po
     val configuration = LocalConfiguration.current
     val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
     val currentDisplayPos = sliderPos?.toLong() ?: pos
+
+    val pagerState = rememberPagerState(initialPage = currentIndex, pageCount = { queue.size.coerceAtLeast(1) })
+
+    LaunchedEffect(currentIndex) {
+        if (pagerState.currentPage != currentIndex && queue.isNotEmpty()) {
+            pagerState.animateScrollToPage(currentIndex)
+        }
+    }
+
+    LaunchedEffect(pagerState.settledPage) {
+        if (pagerState.settledPage != currentIndex && queue.isNotEmpty()) {
+            player?.seekToDefaultPosition(pagerState.settledPage)
+        }
+    }
 
     if (showInfo && song != null) {
         AlertDialog(onDismissRequest = { showInfo = false }, title = { Text("ℹ️ Info") }, text = { Column { Text("${s.format}: ${song.mimeType}"); Text("${s.size}: ${formatSize(song.size)}") } }, confirmButton = { TextButton(onClick = { showInfo = false }) { Text("OK") } })
@@ -769,20 +804,23 @@ fun FullScreenPlayer(song: Song?, isPlaying: Boolean, playbackError: Boolean, po
     Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
         if (isLandscape) {
             Row(modifier = Modifier.fillMaxSize().padding(16.dp)) {
-                AnimatedContent(targetState = song, transitionSpec = { slideInHorizontally { it } + fadeIn() togetherWith slideOutHorizontally { -it } + fadeOut() }, label = "ArtworkLand", modifier = Modifier.weight(1f).fillMaxHeight()) { animSong ->
-                    Box(modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(28.dp)).background(MaterialTheme.colorScheme.surfaceVariant), contentAlignment = Alignment.Center) {
-                        val isUnsuppAnim = animSong?.dataPath?.endsWith(".wma", true) == true || playbackError
-                        Crossfade(targetState = showLyrics && !isUnsuppAnim, label = "LyricsFade") { showL ->
+                HorizontalPager(state = pagerState, modifier = Modifier.weight(1f).fillMaxHeight()) { page ->
+                    val pageSong = queue.getOrNull(page)
+                    Box(modifier = Modifier.fillMaxSize().padding(end = 24.dp).clip(RoundedCornerShape(28.dp)).background(MaterialTheme.colorScheme.surfaceVariant), contentAlignment = Alignment.Center) {
+                        val isUnsuppAnim = pageSong?.dataPath?.endsWith(".wma", true) == true || playbackError
+                        Crossfade(targetState = showLyrics && !isUnsuppAnim && page == currentIndex, label = "LyricsFade") { showL ->
                             if (showL) {
-                                if (isEditingLyrics) OutlinedTextField(value = lyricsText, onValueChange = { lyricsText = it; prefs.edit().putString("lyrics_${animSong?.id}", it).apply() }, modifier = Modifier.fillMaxSize().padding(8.dp))
+                                if (isEditingLyrics) OutlinedTextField(value = lyricsText, onValueChange = { lyricsText = it; prefs.edit().putString("lyrics_${pageSong?.id}", it).apply() }, modifier = Modifier.fillMaxSize().padding(8.dp))
                                 else if (parsedLyrics.isNotEmpty()) LrcViewer(parsedLyrics, currentDisplayPos, onSeek)
                                 else if (lyricsText.isNotBlank()) Text(lyricsText, modifier = Modifier.padding(16.dp).verticalScroll(rememberScrollState()), textAlign = TextAlign.Center)
-                                else OutlinedTextField(value = lyricsText, onValueChange = { lyricsText = it; prefs.edit().putString("lyrics_${animSong?.id}", it).apply() }, modifier = Modifier.fillMaxSize().padding(8.dp), placeholder = { Text(s.pasteLyrics) })
-                            } else AsyncImage(model = animSong?.artworkUri, contentDescription = null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop, error = rememberVectorPainter(Icons.Default.MusicNote))
+                                else OutlinedTextField(value = lyricsText, onValueChange = { lyricsText = it; prefs.edit().putString("lyrics_${pageSong?.id}", it).apply() }, modifier = Modifier.fillMaxSize().padding(8.dp), placeholder = { Text(s.pasteLyrics) })
+                            } else AsyncImage(
+                                model = ImageRequest.Builder(LocalContext.current).data(pageSong?.artworkUri).crossfade(true).memoryCachePolicy(CachePolicy.ENABLED).diskCachePolicy(CachePolicy.ENABLED).build(),
+                                contentDescription = null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop, error = rememberVectorPainter(Icons.Default.MusicNote)
+                            )
                         }
                     }
                 }
-                Spacer(Modifier.width(24.dp))
                 Column(modifier = Modifier.weight(1f).fillMaxHeight(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                         IconButton(onClick = onClose) { Icon(Icons.Default.KeyboardArrowDown, null, Modifier.size(36.dp)) }
@@ -793,16 +831,14 @@ fun FullScreenPlayer(song: Song?, isPlaying: Boolean, playbackError: Boolean, po
                         }
                     }
                     Spacer(Modifier.weight(1f))
-                    AnimatedContent(targetState = song, transitionSpec = { slideInHorizontally { it } + fadeIn() togetherWith slideOutHorizontally { -it } + fadeOut() }, label = "InfoLand") { animSong ->
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Text(animSong?.title ?: s.unknownTitle, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.ExtraBold, textAlign = TextAlign.Center, maxLines = 2)
-                                if (animSong?.mimeType?.contains("flac", true) == true || animSong?.mimeType?.contains("wav", true) == true) {
-                                    Surface(color = MaterialTheme.colorScheme.tertiaryContainer, shape = RoundedCornerShape(8.dp), modifier = Modifier.padding(start = 8.dp)) { Text(s.hq, fontSize = 10.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp), color = MaterialTheme.colorScheme.onTertiaryContainer) }
-                                }
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(song?.title ?: s.unknownTitle, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.ExtraBold, textAlign = TextAlign.Center, maxLines = 2)
+                            if (song?.mimeType?.contains("flac", true) == true || song?.mimeType?.contains("wav", true) == true) {
+                                Surface(color = MaterialTheme.colorScheme.tertiaryContainer, shape = RoundedCornerShape(8.dp), modifier = Modifier.padding(start = 8.dp)) { Text(s.hq, fontSize = 10.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp), color = MaterialTheme.colorScheme.onTertiaryContainer) }
                             }
-                            Text(animSong?.artist ?: s.unknownArtist, style = MaterialTheme.typography.titleLarge, color = MaterialTheme.colorScheme.primary, maxLines = 1)
                         }
+                        Text(song?.artist ?: s.unknownArtist, style = MaterialTheme.typography.titleLarge, color = MaterialTheme.colorScheme.primary, maxLines = 1)
                     }
 
                     if (isUnsupported) {
@@ -848,27 +884,31 @@ fun FullScreenPlayer(song: Song?, isPlaying: Boolean, playbackError: Boolean, po
                 }
                 Spacer(Modifier.weight(1f))
 
-                AnimatedContent(targetState = song, transitionSpec = { slideInHorizontally { it } + fadeIn() togetherWith slideOutHorizontally { -it } + fadeOut() }, label = "ArtworkAndInfoPort") { animSong ->
+                HorizontalPager(state = pagerState, modifier = Modifier.fillMaxWidth()) { page ->
+                    val pageSong = queue.getOrNull(page)
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Box(modifier = Modifier.fillMaxWidth().aspectRatio(1f).clip(RoundedCornerShape(28.dp)).background(MaterialTheme.colorScheme.surfaceVariant), contentAlignment = Alignment.Center) {
-                            val isUnsuppAnim = animSong?.dataPath?.endsWith(".wma", true) == true || playbackError
-                            Crossfade(targetState = showLyrics && !isUnsuppAnim, label = "LyricsFade") { showL ->
+                            val isUnsuppAnim = pageSong?.dataPath?.endsWith(".wma", true) == true || playbackError
+                            Crossfade(targetState = showLyrics && !isUnsuppAnim && page == currentIndex, label = "LyricsFade") { showL ->
                                 if (showL) {
-                                    if (isEditingLyrics) OutlinedTextField(value = lyricsText, onValueChange = { lyricsText = it; prefs.edit().putString("lyrics_${animSong?.id}", it).apply() }, modifier = Modifier.fillMaxSize().padding(8.dp))
+                                    if (isEditingLyrics) OutlinedTextField(value = lyricsText, onValueChange = { lyricsText = it; prefs.edit().putString("lyrics_${pageSong?.id}", it).apply() }, modifier = Modifier.fillMaxSize().padding(8.dp))
                                     else if (parsedLyrics.isNotEmpty()) LrcViewer(parsedLyrics, currentDisplayPos, onSeek)
                                     else if (lyricsText.isNotBlank()) Text(lyricsText, modifier = Modifier.padding(16.dp).verticalScroll(rememberScrollState()), textAlign = TextAlign.Center)
-                                    else OutlinedTextField(value = lyricsText, onValueChange = { lyricsText = it; prefs.edit().putString("lyrics_${animSong?.id}", it).apply() }, modifier = Modifier.fillMaxSize().padding(8.dp), placeholder = { Text(s.pasteLyrics) })
-                                } else AsyncImage(model = animSong?.artworkUri, contentDescription = null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop, error = rememberVectorPainter(Icons.Default.MusicNote))
+                                    else OutlinedTextField(value = lyricsText, onValueChange = { lyricsText = it; prefs.edit().putString("lyrics_${pageSong?.id}", it).apply() }, modifier = Modifier.fillMaxSize().padding(8.dp), placeholder = { Text(s.pasteLyrics) })
+                                } else AsyncImage(
+                                    model = ImageRequest.Builder(LocalContext.current).data(pageSong?.artworkUri).crossfade(true).memoryCachePolicy(CachePolicy.ENABLED).diskCachePolicy(CachePolicy.ENABLED).build(),
+                                    contentDescription = null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop, error = rememberVectorPainter(Icons.Default.MusicNote)
+                                )
                             }
                         }
                         Spacer(Modifier.height(48.dp))
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(animSong?.title ?: s.unknownTitle, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.ExtraBold, textAlign = TextAlign.Center, maxLines = 2)
-                            if (animSong?.mimeType?.contains("flac", true) == true || animSong?.mimeType?.contains("wav", true) == true) {
+                            Text(pageSong?.title ?: s.unknownTitle, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.ExtraBold, textAlign = TextAlign.Center, maxLines = 2)
+                            if (pageSong?.mimeType?.contains("flac", true) == true || pageSong?.mimeType?.contains("wav", true) == true) {
                                 Surface(color = MaterialTheme.colorScheme.tertiaryContainer, shape = RoundedCornerShape(8.dp), modifier = Modifier.padding(start = 8.dp)) { Text(s.hq, fontSize = 10.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp), color = MaterialTheme.colorScheme.onTertiaryContainer) }
                             }
                         }
-                        Text(animSong?.artist ?: s.unknownArtist, style = MaterialTheme.typography.titleLarge, color = MaterialTheme.colorScheme.primary, maxLines = 1)
+                        Text(pageSong?.artist ?: s.unknownArtist, style = MaterialTheme.typography.titleLarge, color = MaterialTheme.colorScheme.primary, maxLines = 1)
                     }
                 }
 
